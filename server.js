@@ -1,11 +1,13 @@
 /**
- * M-Pesa STK Push API - WITH PERMISSIVE HTTPS AGENT
- * Save this as server.js
+ * M-Pesa STK Push API - Fixed for Render
+ * Uses axios for better SSL handling
  */
 
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
+const axios = require('axios');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 // ============================================================
 // ===================== CONFIGURATION =====================
@@ -21,118 +23,26 @@ const CALLBACK_URL = 'https://new-mpesa-backend-1.onrender.com/api/mpesa-callbac
 const PORT = process.env.PORT || 10000;
 
 // ============================================================
-// ===================== PERMISSIVE HTTPS AGENT =====================
+// ===================== AXIOS INSTANCE =====================
 // ============================================================
 
-// This agent ignores SSL errors and uses older TLS versions
-const agent = new https.Agent({
-    rejectUnauthorized: false,
-    keepAlive: true,
-    keepAliveMsecs: 1000,
-    maxSockets: 50,
-    maxFreeSockets: 10,
-    timeout: 120000,
-    // Allow older TLS versions
-    secureProtocol: 'TLSv1_method',
-    // Allow all ciphers
-    ciphers: 'ALL:!aNULL:!eNULL:!LOW:!EXPORT:!SSLv2',
-    honorCipherOrder: false
+// Create axios instance with permissive SSL settings
+const axiosInstance = axios.create({
+    httpsAgent: new https.Agent({
+        rejectUnauthorized: false,
+        keepAlive: true,
+        timeout: 60000,
+        secureProtocol: 'TLSv1_2_method',
+        ciphers: 'ALL:!aNULL:!eNULL:!LOW:!EXPORT:!SSLv2',
+        honorCipherOrder: false
+    }),
+    timeout: 60000,
+    headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; TenantPortal/2.0)',
+        'Accept': 'application/json',
+        'Connection': 'keep-alive'
+    }
 });
-
-// ============================================================
-// ===================== REQUEST HELPER =====================
-// ============================================================
-
-function makeRequest(method, urlString, headers = {}, jsonBody = null) {
-    return new Promise((resolve, reject) => {
-        const url = new URL(urlString);
-        const payload = jsonBody ? JSON.stringify(jsonBody) : null;
-
-        console.log(`\n[REQUEST] ${method} ${urlString}`);
-        
-        // Log headers (mask sensitive)
-        const safeHeaders = { ...headers };
-        if (safeHeaders.Authorization) {
-            safeHeaders.Authorization = safeHeaders.Authorization.substring(0, 30) + '...';
-        }
-        console.log('[HEADERS]', JSON.stringify(safeHeaders, null, 2));
-
-        const options = {
-            hostname: url.hostname,
-            port: url.port || 443,
-            path: url.pathname + url.search,
-            method: method.toUpperCase(),
-            headers: {
-                ...headers,
-                ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
-                'Connection': 'keep-alive',
-                'Accept': 'application/json'
-            },
-            timeout: 90000,
-            agent: agent,
-            family: 4 // Force IPv4
-        };
-
-        const req = https.request(options, (res) => {
-            let chunks = [];
-            let responseSize = 0;
-
-            res.on('data', (chunk) => {
-                chunks.push(chunk);
-                responseSize += chunk.length;
-            });
-
-            res.on('end', () => {
-                const bodyText = Buffer.concat(chunks).toString('utf8');
-                let bodyJson = null;
-                try { bodyJson = JSON.parse(bodyText); } catch (_) {}
-                
-                console.log(`[RESPONSE] Status: ${res.statusCode}`);
-                console.log(`[RESPONSE] Size: ${responseSize} bytes`);
-                if (bodyText && bodyText.length < 500) {
-                    console.log(`[RESPONSE] Body: ${bodyText}`);
-                } else if (bodyText) {
-                    console.log(`[RESPONSE] Body: ${bodyText.substring(0, 300)}...`);
-                }
-                
-                resolve({
-                    statusCode: res.statusCode,
-                    statusMessage: res.statusMessage,
-                    bodyText,
-                    bodyJson
-                });
-            });
-        });
-
-        req.on('error', (err) => {
-            console.error('[REQUEST ERROR]', err.message);
-            console.error('[ERROR CODE]', err.code);
-            reject(new Error(`Request failed: ${err.message} (${err.code || 'unknown'})`));
-        });
-        
-        req.on('timeout', () => {
-            console.error('[REQUEST TIMEOUT]');
-            req.destroy();
-            reject(new Error('Request timed out after 90 seconds'));
-        });
-
-        // Add socket timeout
-        req.on('socket', (socket) => {
-            socket.setTimeout(90000);
-            socket.on('timeout', () => {
-                console.error('[SOCKET TIMEOUT]');
-                req.destroy();
-                reject(new Error('Socket timed out'));
-            });
-        });
-
-        if (payload) {
-            console.log(`[PAYLOAD] ${payload.substring(0, 200)}...`);
-            req.write(payload);
-        }
-        req.end();
-    });
-}
 
 // ============================================================
 // ===================== OAUTH =====================
@@ -142,32 +52,34 @@ async function getAccessToken() {
     console.log('\n🔑 Getting access token...');
     
     const auth = Buffer.from(`${CONSUMER_KEY.trim()}:${CONSUMER_SECRET.trim()}`).toString('base64');
-    console.log(`[AUTH] Basic ${auth.substring(0, 20)}...`);
 
-    const res = await makeRequest(
-        'GET',
-        'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
-        {
-            'Authorization': `Basic ${auth}`,
-            'Accept': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (compatible; TenantPortal/1.0)'
+    try {
+        const response = await axiosInstance({
+            method: 'GET',
+            url: 'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
+            headers: {
+                'Authorization': `Basic ${auth}`
+            }
+        });
+
+        if (response.status !== 200) {
+            throw new Error(`OAuth failed (${response.status}): ${JSON.stringify(response.data)}`);
         }
-    );
 
-    if (res.statusCode === 400 || res.statusCode === 401) {
-        throw new Error(`Authentication failed (${res.statusCode}): ${res.bodyText}`);
+        if (!response.data || !response.data.access_token) {
+            throw new Error('No access token in response');
+        }
+
+        console.log('✅ Access token obtained');
+        return response.data.access_token;
+    } catch (error) {
+        console.error('❌ OAuth error:', error.message);
+        if (error.response) {
+            console.error('Response status:', error.response.status);
+            console.error('Response data:', error.response.data);
+        }
+        throw error;
     }
-
-    if (res.statusCode !== 200) {
-        throw new Error(`OAuth failed (${res.statusCode}): ${res.bodyText}`);
-    }
-
-    if (!res.bodyJson || !res.bodyJson.access_token) {
-        throw new Error('No access token in response');
-    }
-
-    console.log('✅ Access token obtained');
-    return res.bodyJson.access_token;
 }
 
 // ============================================================
@@ -233,34 +145,41 @@ async function stkPush({ phone, amount, accountReference }) {
 
     console.log('📤 Sending STK Push to Safaricom...');
     
-    const res = await makeRequest(
-        'POST',
-        'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
-        {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (compatible; TenantPortal/1.0)'
-        },
-        payload
-    );
+    try {
+        const response = await axiosInstance({
+            method: 'POST',
+            url: 'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            data: payload
+        });
 
-    if (!res.bodyJson) {
-        throw new Error('Invalid response from Safaricom');
-    }
+        if (!response.data) {
+            throw new Error('Invalid response from Safaricom');
+        }
 
-    console.log(`📊 Response Code: ${res.bodyJson.ResponseCode}`);
-    console.log(`📝 Description: ${res.bodyJson.ResponseDescription}`);
+        console.log(`📊 Response Code: ${response.data.ResponseCode}`);
+        console.log(`📝 Description: ${response.data.ResponseDescription}`);
 
-    if (res.bodyJson.ResponseCode === '0') {
-        console.log('✅ STK Push successful!');
-        return {
-            success: true,
-            data: res.bodyJson,
-            message: res.bodyJson.CustomerMessage || 'STK Push sent'
-        };
-    } else {
-        const errorMsg = res.bodyJson.ResponseDescription || res.bodyJson.CustomerMessage || 'STK Push failed';
-        throw new Error(errorMsg);
+        if (response.data.ResponseCode === '0') {
+            console.log('✅ STK Push successful!');
+            return {
+                success: true,
+                data: response.data,
+                message: response.data.CustomerMessage || 'STK Push sent'
+            };
+        } else {
+            throw new Error(response.data.ResponseDescription || 'STK Push failed');
+        }
+    } catch (error) {
+        console.error('❌ STK Push error:', error.message);
+        if (error.response) {
+            console.error('Response status:', error.response.status);
+            console.error('Response data:', error.response.data);
+        }
+        throw error;
     }
 }
 
@@ -409,7 +328,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         <div id="status" class="status info">Ready</div>
 
         <div class="debug" id="debugInfo">Server URL: <span id="serverUrl">Loading...</span></div>
-        <div class="note">⏱️ If payment fails, the server retries automatically.</div>
+        <div class="note">⏱️ Using axios for better connection reliability</div>
     </div>
 
     <script>
@@ -514,15 +433,25 @@ const server = http.createServer(async (req, res) => {
         }
 
         if (req.method === 'GET' && url.pathname === '/api/health') {
-            return sendJson(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
+            return sendJson(res, 200, { 
+                status: 'ok', 
+                timestamp: new Date().toISOString(),
+                message: 'Server is running (axios version)'
+            });
         }
 
         if (req.method === 'GET' && url.pathname === '/api/test-oauth') {
             try {
                 const token = await getAccessToken();
-                return sendJson(res, 200, { success: true, token_preview: token.substring(0, 20) + '...' });
+                return sendJson(res, 200, { 
+                    success: true, 
+                    token_preview: token.substring(0, 20) + '...' 
+                });
             } catch (err) {
-                return sendJson(res, 502, { success: false, error: err.message });
+                return sendJson(res, 502, { 
+                    success: false, 
+                    error: err.message 
+                });
             }
         }
 
@@ -530,8 +459,12 @@ const server = http.createServer(async (req, res) => {
             const body = await readBody(req);
             console.log('📥 STK Push request:', body);
             
-            if (!body.phone) return sendJson(res, 400, { error: 'Phone number required' });
-            if (!body.amount) return sendJson(res, 400, { error: 'Amount required' });
+            if (!body.phone) {
+                return sendJson(res, 400, { error: 'Phone number required' });
+            }
+            if (!body.amount) {
+                return sendJson(res, 400, { error: 'Amount required' });
+            }
 
             try {
                 const result = await stkPush({
@@ -542,7 +475,10 @@ const server = http.createServer(async (req, res) => {
                 return sendJson(res, 200, result);
             } catch (err) {
                 console.error('❌ STK Push error:', err.message);
-                return sendJson(res, 502, { success: false, error: err.message });
+                return sendJson(res, 502, { 
+                    success: false, 
+                    error: err.message 
+                });
             }
         }
 
@@ -550,6 +486,7 @@ const server = http.createServer(async (req, res) => {
             return sendJson(res, 200, {
                 name: 'M-Pesa STK Push API',
                 status: 'Running',
+                version: '2.0.0 (axios)',
                 endpoints: {
                     home: 'GET /',
                     health: 'GET /api/health',
