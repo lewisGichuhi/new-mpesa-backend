@@ -21,25 +21,18 @@ const CALLBACK_URL = 'https://new-mpesa-backend-1.onrender.com/api/mpesa-callbac
 const PORT = process.env.PORT || 10000;
 
 // ============================================================
-// ===================== PERMISSIVE HTTPS AGENT =====================
+// ===================== HTTPS AGENT =====================
 // ============================================================
 
 const agent = new https.Agent({
     rejectUnauthorized: false,
     keepAlive: true,
-    keepAliveMsecs: 1000,
-    maxSockets: 50,
-    maxFreeSockets: 10,
-    timeout: 120000,
-    // Force TLS 1.2
-    secureProtocol: 'TLSv1_2_method',
-    // Allow older ciphers
-    ciphers: 'ALL:!aNULL:!eNULL:!LOW:!EXPORT:!SSLv2',
-    honorCipherOrder: false
+    timeout: 90000,
+    secureProtocol: 'TLSv1_2_method'
 });
 
 // ============================================================
-// ===================== REQUEST WITH RETRY =====================
+// ===================== REQUEST HELPER =====================
 // ============================================================
 
 function requestWithRetry(method, urlString, headers = {}, jsonBody = null, retries = 3) {
@@ -59,19 +52,13 @@ function requestWithRetry(method, urlString, headers = {}, jsonBody = null, retr
                     ...headers,
                     ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
                     'Connection': 'keep-alive',
-                    'Accept': '*/*',
-                    'User-Agent': 'Mozilla/5.0 (compatible; TenantPortal/2.0)'
+                    'Accept': 'application/json',
+                    'User-Agent': 'TenantPortal/2.0'
                 },
                 timeout: 90000,
                 agent: agent,
-                family: 4, // Force IPv4
-                lookup: (hostname, options, callback) => {
-                    // Try to resolve to a specific IP if needed
-                    callback(null, null, 4);
-                }
+                family: 4
             };
-
-            console.log(`[OPTIONS] Host: ${options.hostname}, Path: ${options.path}`);
 
             const req = https.request(options, (res) => {
                 let chunks = [];
@@ -90,40 +77,34 @@ function requestWithRetry(method, urlString, headers = {}, jsonBody = null, retr
                         statusCode: res.statusCode,
                         statusMessage: res.statusMessage,
                         bodyText,
-                        bodyJson,
-                        attempt: attemptNumber
+                        bodyJson
                     });
                 });
             });
 
             req.on('error', (err) => {
                 console.error(`[ATTEMPT ${attemptNumber} ERROR]`, err.message);
-                console.error(`[ERROR CODE]`, err.code);
                 
                 if (attemptNumber < retries) {
                     const delay = attemptNumber * 2000;
                     console.log(`🔄 Retrying in ${delay/1000} seconds...`);
                     setTimeout(() => attempt(attemptNumber + 1), delay);
                 } else {
-                    reject(new Error(`Request failed after ${retries} attempts: ${err.message} (${err.code || 'unknown'})`));
+                    reject(new Error(`Request failed: ${err.message}`));
                 }
             });
             
             req.on('timeout', () => {
                 console.error(`[ATTEMPT ${attemptNumber} TIMEOUT]`);
                 req.destroy();
-                
                 if (attemptNumber < retries) {
-                    const delay = attemptNumber * 2000;
-                    console.log(`🔄 Retrying in ${delay/1000} seconds...`);
-                    setTimeout(() => attempt(attemptNumber + 1), delay);
+                    setTimeout(() => attempt(attemptNumber + 1), attemptNumber * 2000);
                 } else {
-                    reject(new Error(`Request timed out after ${retries} attempts`));
+                    reject(new Error('Request timed out'));
                 }
             });
 
             if (payload) {
-                console.log(`[PAYLOAD] ${payload.substring(0, 200)}...`);
                 req.write(payload);
             }
             req.end();
@@ -204,7 +185,6 @@ async function stkPush({ phone, amount, accountReference }) {
     if (!formattedPhone || formattedPhone.length < 10) {
         throw new Error(`Invalid phone: ${phone}`);
     }
-    console.log(`📱 Normalized: ${formattedPhone}`);
 
     const token = await getAccessToken();
     const timestamp = timestampNow();
@@ -241,9 +221,6 @@ async function stkPush({ phone, amount, accountReference }) {
         throw new Error('Invalid response from Safaricom');
     }
 
-    console.log(`📊 Response Code: ${res.bodyJson.ResponseCode}`);
-    console.log(`📝 Description: ${res.bodyJson.ResponseDescription}`);
-
     if (res.bodyJson.ResponseCode === '0') {
         console.log('✅ STK Push successful!');
         return {
@@ -252,8 +229,7 @@ async function stkPush({ phone, amount, accountReference }) {
             message: res.bodyJson.CustomerMessage || 'STK Push sent'
         };
     } else {
-        const errorMsg = res.bodyJson.ResponseDescription || res.bodyJson.CustomerMessage || 'STK Push failed';
-        throw new Error(errorMsg);
+        throw new Error(res.bodyJson.ResponseDescription || 'STK Push failed');
     }
 }
 
@@ -284,221 +260,11 @@ function readBody(req) {
 }
 
 // ============================================================
-// ===================== TEST HTML =====================
-// ============================================================
-
-const HTML_PAGE = `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Payment Test</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #0f172a;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            margin: 0;
-            padding: 20px;
-            color: white;
-        }
-        .card {
-            background: #1e293b;
-            padding: 30px;
-            border-radius: 16px;
-            max-width: 400px;
-            width: 100%;
-            border: 1px solid #334155;
-        }
-        h1 { text-align: center; }
-        label { display: block; margin: 10px 0 5px; font-size: 14px; color: #94a3b8; }
-        input {
-            width: 100%;
-            padding: 12px;
-            border: 1px solid #334155;
-            border-radius: 8px;
-            background: #0f172a;
-            color: white;
-            font-size: 16px;
-            box-sizing: border-box;
-        }
-        button {
-            width: 100%;
-            padding: 14px;
-            background: #10b981;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            margin-top: 10px;
-        }
-        button:hover { background: #059669; }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
-        .status { margin-top: 10px; padding: 10px; border-radius: 8px; text-align: center; }
-        .success { background: #065f46; color: #34d399; }
-        .error { background: #7f1d1d; color: #fb7185; }
-        .pending { background: #1e3a5f; color: #60a5fa; }
-        .debug {
-            margin-top: 15px;
-            padding: 10px;
-            background: #0f172a;
-            border-radius: 8px;
-            font-size: 12px;
-            color: #64748b;
-            word-break: break-all;
-            max-height: 200px;
-            overflow-y: auto;
-        }
-        .server-status {
-            text-align: center;
-            padding: 8px;
-            border-radius: 8px;
-            margin-bottom: 10px;
-            font-size: 13px;
-        }
-        .server-status.online { background: rgba(16,185,129,0.1); color: #34d399; }
-        .server-status.offline { background: rgba(244,63,94,0.1); color: #fb7185; }
-        .server-status.checking { background: rgba(99,102,241,0.1); color: #a5b4fc; }
-        .note {
-            font-size: 11px;
-            color: #64748b;
-            text-align: center;
-            margin-top: 8px;
-        }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h1>🏢 Payment Test</h1>
-        
-        <div id="serverStatus" class="server-status checking">⏳ Checking server...</div>
-
-        <label>Phone Number</label>
-        <input type="tel" id="phoneInput" placeholder="0712345678">
-
-        <label>Amount (KES)</label>
-        <input type="number" id="amountInput" placeholder="10">
-
-        <button id="payBtn" onclick="submitPayment()">💳 Pay Now</button>
-        <div id="status" class="status" style="background:#1e293b;color:#94a3b8;">Ready</div>
-
-        <div class="debug" id="debugInfo">Server URL: <span id="serverUrl">Loading...</span></div>
-        <div class="note">⏱️ If payment fails, the server will retry automatically up to 3 times.</div>
-    </div>
-
-    <script>
-        function getServerUrl() {
-            const hostname = window.location.hostname;
-            if (hostname === 'localhost' || hostname === '127.0.0.1') {
-                return 'http://localhost:10000/api/stkpush';
-            }
-            return 'https://new-mpesa-backend-1.onrender.com/api/stkpush';
-        }
-
-        const SERVER_URL = getServerUrl();
-        document.getElementById('serverUrl').textContent = SERVER_URL;
-
-        async function checkServer() {
-            const statusEl = document.getElementById('serverStatus');
-            statusEl.textContent = '⏳ Checking server...';
-            statusEl.className = 'server-status checking';
-            
-            try {
-                const healthUrl = SERVER_URL.replace('/api/stkpush', '/api/health');
-                const response = await fetch(healthUrl);
-                const data = await response.json();
-                
-                if (response.ok) {
-                    statusEl.textContent = '✅ Server Online';
-                    statusEl.className = 'server-status online';
-                } else {
-                    statusEl.textContent = '❌ Server Error: ' + response.status;
-                    statusEl.className = 'server-status offline';
-                }
-            } catch (error) {
-                statusEl.textContent = '❌ Cannot reach server: ' + error.message;
-                statusEl.className = 'server-status offline';
-            }
-        }
-
-        async function submitPayment() {
-            const phone = document.getElementById('phoneInput').value.trim();
-            const amount = document.getElementById('amountInput').value.trim();
-            const statusEl = document.getElementById('status');
-            const btn = document.getElementById('payBtn');
-            const debugEl = document.getElementById('debugInfo');
-
-            if (!phone) {
-                statusEl.textContent = 'Please enter your phone number.';
-                statusEl.className = 'status error';
-                return;
-            }
-            if (!amount || Number(amount) <= 0) {
-                statusEl.textContent = 'Please enter a valid amount.';
-                statusEl.className = 'status error';
-                return;
-            }
-
-            btn.disabled = true;
-            btn.textContent = 'Processing...';
-            statusEl.textContent = 'Sending...';
-            statusEl.className = 'status pending';
-            debugEl.textContent = '📤 Sending to: ' + SERVER_URL;
-
-            try {
-                const payload = {
-                    phone: phone,
-                    amount: amount,
-                    accountReference: 'TEST-001'
-                };
-                
-                debugEl.textContent = '📤 Payload: ' + JSON.stringify(payload);
-
-                const response = await fetch(SERVER_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-
-                const data = await response.json();
-                debugEl.textContent = '📥 Response: ' + JSON.stringify(data);
-
-                if (response.ok && data.success) {
-                    statusEl.textContent = '✅ Payment sent! Check your phone.';
-                    statusEl.className = 'status success';
-                    document.getElementById('phoneInput').value = '';
-                    document.getElementById('amountInput').value = '';
-                } else {
-                    statusEl.textContent = '❌ Failed: ' + (data.error || data.message || 'Unknown');
-                    statusEl.className = 'status error';
-                }
-            } catch (error) {
-                debugEl.textContent = '❌ Error: ' + error.message;
-                statusEl.textContent = '❌ Error: ' + error.message;
-                statusEl.className = 'status error';
-            } finally {
-                btn.disabled = false;
-                btn.textContent = '💳 Pay Now';
-            }
-        }
-
-        document.addEventListener('DOMContentLoaded', function() {
-            setTimeout(checkServer, 500);
-        });
-    </script>
-</body>
-</html>`;
-
-// ============================================================
 // ===================== CREATE SERVER =====================
 // ============================================================
 
 const server = http.createServer(async (req, res) => {
+    // Always set CORS headers first
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -510,12 +276,20 @@ const server = http.createServer(async (req, res) => {
     }
 
     const url = new URL(req.url, `http://${req.headers.host}`);
+    console.log(`📥 ${req.method} ${url.pathname}`);
 
     try {
         // ===== SERVE HTML =====
         if (req.method === 'GET' && url.pathname === '/') {
-            res.writeHead(200, { 'Content-Type': 'text/html' });
-            res.end(HTML_PAGE);
+            const fs = require('fs');
+            try {
+                const html = fs.readFileSync('./index.html', 'utf8');
+                res.writeHead(200, { 'Content-Type': 'text/html' });
+                res.end(html);
+            } catch (err) {
+                res.writeHead(200, { 'Content-Type': 'text/html' });
+                res.end(`<!DOCTYPE html><html><head><title>Server Running</title></head><body><h1>✅ Server is running!</h1><p>Visit /api/health to check status.</p></body></html>`);
+            }
             return;
         }
 
@@ -523,8 +297,7 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'GET' && url.pathname === '/api/health') {
             return sendJson(res, 200, { 
                 status: 'ok', 
-                timestamp: new Date().toISOString(),
-                message: 'Server is running'
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -546,7 +319,13 @@ const server = http.createServer(async (req, res) => {
 
         // ===== STK PUSH =====
         if (req.method === 'POST' && url.pathname === '/api/stkpush') {
-            const body = await readBody(req);
+            let body;
+            try {
+                body = await readBody(req);
+            } catch (err) {
+                return sendJson(res, 400, { error: 'Invalid JSON body' });
+            }
+            
             console.log('📥 STK Push request:', body);
             
             if (!body.phone) {
@@ -572,25 +351,24 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
-        // ===== API INFO =====
-        if (req.method === 'GET' && url.pathname === '/api') {
-            return sendJson(res, 200, {
-                name: 'M-Pesa STK Push API',
-                status: 'Running',
-                endpoints: {
-                    home: 'GET /',
-                    health: 'GET /api/health',
-                    test_oauth: 'GET /api/test-oauth',
-                    stkpush: 'POST /api/stkpush'
-                }
-            });
-        }
-
-        return sendJson(res, 404, { error: 'Route not found' });
+        // ===== 404 =====
+        return sendJson(res, 404, { 
+            error: 'Route not found',
+            message: `No route found for ${req.method} ${url.pathname}`,
+            available: {
+                '/': 'HTML Page',
+                '/api/health': 'Health Check',
+                '/api/test-oauth': 'Test OAuth',
+                '/api/stkpush': 'STK Push (POST)'
+            }
+        });
 
     } catch (err) {
-        console.error('Server error:', err);
-        return sendJson(res, 500, { error: 'Internal server error' });
+        console.error('❌ Server error:', err.message);
+        return sendJson(res, 500, { 
+            error: 'Internal server error',
+            message: err.message 
+        });
     }
 });
 
