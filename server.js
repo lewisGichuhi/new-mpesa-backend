@@ -1,13 +1,6 @@
 /**
  * M-Pesa STK Push API - Complete Working Version
  * Deployed on: https://new-mpesa-backend-1.onrender.com
- * 
- * Features:
- * - OAuth authentication with Safaricom
- * - STK Push payment requests
- * - M-Pesa callback handling for auto-recording payments
- * - Real-time Firebase updates
- * - CORS enabled for all origins
  */
 
 const http = require('http');
@@ -26,10 +19,8 @@ const CONSUMER_KEY = '8jAAnvNAIwiBXEbJsAsKNZQZTBOg7QGRIdQzvWN3abVuCMtQ';
 const CONSUMER_SECRET = 'U3jAOtpJRDiOVj7w36Xa63EuuBT3fWGXXrWULxVBkBa22imOUrlA5l5CAuvvkPnn';
 
 // CALLBACK URL - FOR M-PESA TO SEND PAYMENT CONFIRMATIONS
-// REPLACE WITH YOUR ACTUAL RENDER URL
 const CALLBACK_URL = 'https://new-mpesa-backend-1.onrender.com/api/mpesa-callback';
 
-// PORT
 const PORT = process.env.PORT || 10000;
 
 // ============================================================
@@ -38,7 +29,9 @@ const PORT = process.env.PORT || 10000;
 
 const agent = new https.Agent({
     rejectUnauthorized: false,
-    keepAlive: true
+    keepAlive: true,
+    maxSockets: 50,
+    timeout: 60000
 });
 
 // ============================================================
@@ -60,21 +53,30 @@ function request(method, urlString, headers = {}, jsonBody = null) {
                 ...headers,
                 ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
             },
-            timeout: 30000,
+            timeout: 60000, // Increased to 60 seconds
             agent: agent
         };
 
         const req = https.request(options, (res) => {
             let chunks = [];
-            res.on('data', (chunk) => chunks.push(chunk));
+            let responseSize = 0;
+
+            res.on('data', (chunk) => {
+                chunks.push(chunk);
+                responseSize += chunk.length;
+            });
+
             res.on('end', () => {
                 const bodyText = Buffer.concat(chunks).toString('utf8');
                 let bodyJson = null;
                 try { bodyJson = JSON.parse(bodyText); } catch (_) {}
                 
                 console.log(`[RESPONSE] Status: ${res.statusCode}`);
-                if (bodyText) {
-                    console.log(`[RESPONSE] Body: ${bodyText.substring(0, 300)}`);
+                console.log(`[RESPONSE] Size: ${responseSize} bytes`);
+                if (bodyText && bodyText.length < 500) {
+                    console.log(`[RESPONSE] Body: ${bodyText}`);
+                } else if (bodyText) {
+                    console.log(`[RESPONSE] Body: ${bodyText.substring(0, 300)}...`);
                 }
                 
                 resolve({
@@ -88,15 +90,29 @@ function request(method, urlString, headers = {}, jsonBody = null) {
 
         req.on('error', (err) => {
             console.error('[REQUEST ERROR]', err.message);
-            reject(err);
+            console.error('[REQUEST ERROR] Code:', err.code);
+            reject(new Error(`Request failed: ${err.message}`));
         });
         
         req.on('timeout', () => {
+            console.error('[REQUEST TIMEOUT] Request exceeded 60 seconds');
             req.destroy();
-            reject(new Error('Request timed out'));
+            reject(new Error('Request timed out after 60 seconds'));
+        });
+
+        req.on('socket', (socket) => {
+            socket.setTimeout(60000);
+            socket.on('timeout', () => {
+                console.error('[SOCKET TIMEOUT] Socket timed out');
+                req.destroy();
+                reject(new Error('Socket timed out'));
+            });
         });
         
-        if (payload) req.write(payload);
+        if (payload) {
+            console.log(`[PAYLOAD] Size: ${payload.length} bytes`);
+            req.write(payload);
+        }
         req.end();
     });
 }
@@ -105,7 +121,6 @@ function request(method, urlString, headers = {}, jsonBody = null) {
 // ===================== FIREBASE HELPER =====================
 // ============================================================
 
-// Firebase REST API helper functions
 function firebaseRequest(method, path, data = null) {
     const FIREBASE_URL = 'https://rent-collection-1b773-default-rtdb.firebaseio.com';
     const url = `${FIREBASE_URL}${path}.json`;
@@ -115,7 +130,9 @@ function firebaseRequest(method, path, data = null) {
             method: method,
             headers: {
                 'Content-Type': 'application/json'
-            }
+            },
+            timeout: 30000,
+            agent: agent
         };
 
         const req = https.request(url, options, (res) => {
@@ -138,6 +155,11 @@ function firebaseRequest(method, path, data = null) {
             reject(err);
         });
 
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('Firebase request timed out'));
+        });
+
         if (data) {
             req.write(JSON.stringify(data));
         }
@@ -154,29 +176,40 @@ async function getAccessToken() {
     
     const auth = Buffer.from(`${CONSUMER_KEY.trim()}:${CONSUMER_SECRET.trim()}`).toString('base64');
 
-    const res = await request(
-        'GET',
-        'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
-        {
-            'Authorization': `Basic ${auth}`,
-            'Accept': 'application/json'
+    try {
+        const res = await request(
+            'GET',
+            'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
+            {
+                'Authorization': `Basic ${auth}`,
+                'Accept': 'application/json',
+                'User-Agent': 'TenantPortal/2.0'
+            }
+        );
+
+        if (res.statusCode === 400) {
+            throw new Error('Authentication failed: Invalid credentials.');
         }
-    );
 
-    if (res.statusCode === 400) {
-        throw new Error('Authentication failed: Invalid credentials.');
+        if (res.statusCode === 401) {
+            throw new Error('Authentication failed: Unauthorized. Check your Consumer Key and Secret.');
+        }
+
+        if (res.statusCode !== 200) {
+            throw new Error(`HTTP ${res.statusCode}: ${res.bodyText}`);
+        }
+
+        if (!res.bodyJson || !res.bodyJson.access_token) {
+            throw new Error('No access token in response');
+        }
+
+        console.log('✅ Access token obtained');
+        console.log(`⏰ Expires in: ${res.bodyJson.expires_in || 'unknown'} seconds`);
+        return res.bodyJson.access_token;
+    } catch (error) {
+        console.error('❌ OAuth error:', error.message);
+        throw error;
     }
-
-    if (res.statusCode !== 200) {
-        throw new Error(`HTTP ${res.statusCode}: ${res.bodyText}`);
-    }
-
-    if (!res.bodyJson || !res.bodyJson.access_token) {
-        throw new Error('No access token in response');
-    }
-
-    console.log('✅ Access token obtained');
-    return res.bodyJson.access_token;
 }
 
 // ============================================================
@@ -212,65 +245,82 @@ async function stkPush({ phone, amount, accountReference }) {
     console.log(`💰 Amount: ${amount}`);
     console.log(`📝 Reference: ${accountReference || 'TenantPortal'}`);
 
-    const numericAmount = Math.round(Number(amount));
-    if (isNaN(numericAmount) || numericAmount < 1) {
-        throw new Error('Invalid amount');
-    }
+    try {
+        const numericAmount = Math.round(Number(amount));
+        if (isNaN(numericAmount) || numericAmount < 1) {
+            throw new Error('Invalid amount');
+        }
 
-    const formattedPhone = normalizePhone(phone);
-    if (!formattedPhone || formattedPhone.length < 10) {
-        throw new Error(`Invalid phone: ${phone}`);
-    }
-    console.log(`📱 Normalized: ${formattedPhone}`);
+        const formattedPhone = normalizePhone(phone);
+        if (!formattedPhone || formattedPhone.length < 10) {
+            throw new Error(`Invalid phone: ${phone}`);
+        }
+        console.log(`📱 Normalized: ${formattedPhone}`);
 
-    const token = await getAccessToken();
-    const timestamp = timestampNow();
-    const password = Buffer.from(`${SHORTCODE}${PASSKEY}${timestamp}`).toString('base64');
+        // Get token with retry
+        let token;
+        try {
+            token = await getAccessToken();
+        } catch (error) {
+            console.error('❌ Failed to get access token:', error.message);
+            throw new Error(`Authentication failed: ${error.message}`);
+        }
 
-    const payload = {
-        BusinessShortCode: SHORTCODE,
-        Password: password,
-        Timestamp: timestamp,
-        TransactionType: 'CustomerPayBillOnline',
-        Amount: numericAmount,
-        PartyA: formattedPhone,
-        PartyB: SHORTCODE,
-        PhoneNumber: formattedPhone,
-        CallBackURL: CALLBACK_URL,
-        AccountReference: accountReference || 'TenantPortal',
-        TransactionDesc: 'Rent Payment'
-    };
+        const timestamp = timestampNow();
+        const password = Buffer.from(`${SHORTCODE}${PASSKEY}${timestamp}`).toString('base64');
 
-    console.log('📤 Sending STK Push request...');
-    
-    const res = await request(
-        'POST',
-        'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
-        {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-        },
-        payload
-    );
-
-    if (!res.bodyJson) {
-        throw new Error('Invalid response from Safaricom');
-    }
-
-    console.log(`📊 Response Code: ${res.bodyJson.ResponseCode}`);
-    console.log(`📝 Response Description: ${res.bodyJson.ResponseDescription}`);
-    console.log(`📝 CheckoutRequestID: ${res.bodyJson.CheckoutRequestID}`);
-
-    if (res.bodyJson.ResponseCode === '0') {
-        console.log('✅ STK Push successful!');
-        return {
-            success: true,
-            data: res.bodyJson,
-            message: res.bodyJson.CustomerMessage || 'STK Push sent'
+        const payload = {
+            BusinessShortCode: SHORTCODE,
+            Password: password,
+            Timestamp: timestamp,
+            TransactionType: 'CustomerPayBillOnline',
+            Amount: numericAmount,
+            PartyA: formattedPhone,
+            PartyB: SHORTCODE,
+            PhoneNumber: formattedPhone,
+            CallBackURL: CALLBACK_URL,
+            AccountReference: accountReference || 'TenantPortal',
+            TransactionDesc: 'Rent Payment'
         };
-    } else {
-        const errorMsg = res.bodyJson.ResponseDescription || res.bodyJson.CustomerMessage || 'STK Push failed';
-        throw new Error(errorMsg);
+
+        console.log('📤 Sending STK Push request to Safaricom...');
+        
+        const res = await request(
+            'POST',
+            'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+            {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                'User-Agent': 'TenantPortal/2.0'
+            },
+            payload
+        );
+
+        if (!res.bodyJson) {
+            throw new Error('Invalid response from Safaricom - no JSON returned');
+        }
+
+        console.log(`📊 Response Code: ${res.bodyJson.ResponseCode}`);
+        console.log(`📝 Response Description: ${res.bodyJson.ResponseDescription}`);
+        console.log(`📝 CheckoutRequestID: ${res.bodyJson.CheckoutRequestID || 'N/A'}`);
+
+        if (res.bodyJson.ResponseCode === '0') {
+            console.log('✅ STK Push successful!');
+            return {
+                success: true,
+                data: res.bodyJson,
+                message: res.bodyJson.CustomerMessage || 'STK Push sent successfully'
+            };
+        } else {
+            const errorMsg = res.bodyJson.ResponseDescription || 
+                            res.bodyJson.CustomerMessage || 
+                            res.bodyJson.errorMessage ||
+                            'STK Push failed';
+            throw new Error(errorMsg);
+        }
+    } catch (error) {
+        console.error('❌ STK Push error:', error.message);
+        throw error;
     }
 }
 
@@ -280,7 +330,6 @@ async function stkPush({ phone, amount, accountReference }) {
 
 async function handleMpesaCallback(callbackData) {
     console.log('\n📥 Processing M-Pesa Callback...');
-    console.log('📥 Callback Data:', JSON.stringify(callbackData, null, 2));
 
     try {
         const stkCallback = callbackData.Body?.stkCallback;
@@ -298,13 +347,11 @@ async function handleMpesaCallback(callbackData) {
         console.log(`📝 Result Description: ${resultDesc}`);
         console.log(`📝 CheckoutRequestID: ${checkoutRequestId}`);
 
-        // Check if payment was successful (ResultCode === 0 means success)
         if (resultCode !== '0') {
             console.log(`❌ Payment failed: ${resultDesc}`);
             return { success: false, error: resultDesc };
         }
 
-        // Extract payment details from callback metadata
         const metadata = stkCallback.CallbackMetadata?.Item || [];
         
         const getItem = (name) => {
@@ -320,21 +367,16 @@ async function handleMpesaCallback(callbackData) {
         console.log(`💰 Amount: ${amount}`);
         console.log(`📱 Phone: ${phone}`);
         console.log(`📝 Account Reference: ${accountReference}`);
-        console.log(`🔢 Transaction ID: ${transactionId}`);
 
         if (!amount || !phone) {
             console.log('❌ Missing amount or phone in callback');
             return { success: false, error: 'Missing payment details' };
         }
 
-        // ==== SAVE TO FIREBASE AUTOMATICALLY ====
+        // Save to Firebase
         const today = new Date().toISOString().slice(0, 10);
-        
-        // Find the tenant ID from account reference
-        // If accountReference is like "001", use it directly
         const tenantId = accountReference.toString().trim();
         
-        // Save the payment to Firebase
         const paymentData = {
             date: today,
             amount: amount,
@@ -348,9 +390,7 @@ async function handleMpesaCallback(callbackData) {
         };
 
         console.log(`💾 Saving payment to Firebase for tenant: ${tenantId}`);
-        console.log(`💾 Payment data:`, paymentData);
 
-        // Save to Firebase using REST API
         const saveResult = await firebaseRequest(
             'POST',
             `/tenant_ledger/${tenantId}/payments`,
@@ -358,11 +398,6 @@ async function handleMpesaCallback(callbackData) {
         );
 
         console.log('✅ Payment automatically recorded in Firebase!');
-        console.log('📊 Save result:', saveResult);
-
-        // Also update the lastMonth/current if needed?
-        // Optional: You can also update the tenant's balance here
-
         return {
             success: true,
             message: 'Payment recorded successfully',
@@ -517,7 +552,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             <p class="sub">M-Pesa Payment</p>
         </div>
         <div class="server-info">
-            ✅ Server: <strong>Connected</strong> | 
+            ✅ Server: <strong id="serverStatus">Checking...</strong> | 
             URL: <span id="serverUrl">Loading...</span>
         </div>
         <label for="phoneInput">M-Pesa Phone Number</label>
@@ -530,6 +565,9 @@ const HTML_PAGE = `<!DOCTYPE html>
     </div>
 </div>
 <script>
+// ============================================================
+// SERVER URL
+// ============================================================
 function getServerUrl() {
     const hostname = window.location.hostname;
     if (hostname === 'localhost' || hostname === '127.0.0.1') {
@@ -541,6 +579,31 @@ function getServerUrl() {
 const PAYMENT_SERVER_URL = getServerUrl();
 document.getElementById('serverUrl').textContent = PAYMENT_SERVER_URL;
 
+// ============================================================
+// CHECK SERVER STATUS
+// ============================================================
+async function checkServerStatus() {
+    const statusEl = document.getElementById('serverStatus');
+    try {
+        const healthUrl = PAYMENT_SERVER_URL.replace('/api/stkpush', '/api/health');
+        const response = await fetch(healthUrl);
+        if (response.ok) {
+            statusEl.textContent = 'Connected ✅';
+            statusEl.style.color = '#34d399';
+        } else {
+            statusEl.textContent = 'Error ⚠️';
+            statusEl.style.color = '#fb7185';
+        }
+    } catch (error) {
+        statusEl.textContent = 'Disconnected ❌';
+        statusEl.style.color = '#fb7185';
+        console.error('Server check failed:', error);
+    }
+}
+
+// ============================================================
+// SUBMIT PAYMENT
+// ============================================================
 async function submitPayment() {
     const phone = document.getElementById('phoneInput').value.trim();
     const amount = document.getElementById('amountInput').value.trim();
@@ -564,6 +627,9 @@ async function submitPayment() {
     statusEl.className = 'status pending';
 
     try {
+        console.log('📤 Sending to:', PAYMENT_SERVER_URL);
+        console.log('📤 Payload:', { phone, amount });
+
         const response = await fetch(PAYMENT_SERVER_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -576,6 +642,7 @@ async function submitPayment() {
         });
 
         const data = await response.json();
+        console.log('📥 Response:', data);
 
         if (response.ok && data.success) {
             statusEl.textContent = '✅ Payment sent! Check your phone for the M-Pesa prompt.';
@@ -587,7 +654,7 @@ async function submitPayment() {
             statusEl.className = 'status error';
         }
     } catch (error) {
-        console.error('Error:', error);
+        console.error('❌ Error:', error);
         statusEl.textContent = '❌ Could not connect. Please try again.';
         statusEl.className = 'status error';
     } finally {
@@ -595,6 +662,13 @@ async function submitPayment() {
         btn.textContent = '💳 Pay Now';
     }
 }
+
+// ============================================================
+// CHECK SERVER ON LOAD
+// ============================================================
+document.addEventListener('DOMContentLoaded', function() {
+    setTimeout(checkServerStatus, 1000);
+});
 </script>
 </body>
 </html>`;
@@ -664,20 +738,16 @@ const server = http.createServer(async (req, res) => {
             console.log('📥 Full callback body:', JSON.stringify(body, null, 2));
             
             try {
-                const result = await handleMpesaCallback(body);
-                
-                // Always respond with success to Safaricom
-                // (They need a 200 OK response even if we fail to process)
+                await handleMpesaCallback(body);
                 return sendJson(res, 200, {
                     ResultCode: 0,
                     ResultDesc: 'Callback received successfully'
                 });
             } catch (error) {
-                console.error('❌ Callback processing error:', error.message);
-                // Still return 200 to Safaricom
+                console.error('❌ Callback error:', error.message);
                 return sendJson(res, 200, {
                     ResultCode: 0,
-                    ResultDesc: 'Callback received (processing error logged)'
+                    ResultDesc: 'Callback received'
                 });
             }
         }
@@ -706,6 +776,7 @@ const server = http.createServer(async (req, res) => {
         // ============================================================
         if (req.method === 'POST' && url.pathname === '/api/stkpush') {
             const body = await readBody(req);
+            console.log('📥 STK Push request:', body);
             
             if (!body.phone) {
                 return sendJson(res, 400, { error: 'Phone number required' });
@@ -722,6 +793,7 @@ const server = http.createServer(async (req, res) => {
                 });
                 return sendJson(res, 200, result);
             } catch (err) {
+                console.error('❌ STK Push error:', err.message);
                 return sendJson(res, 502, { 
                     success: false, 
                     error: err.message 
@@ -744,18 +816,10 @@ const server = http.createServer(async (req, res) => {
                     test_stk: 'POST /api/test-stk',
                     stkpush: 'POST /api/stkpush',
                     callback: 'POST /api/mpesa-callback'
-                },
-                features: {
-                    stk_push: 'Send STK Push to customer',
-                    auto_record: 'Automatically record payments from M-Pesa callbacks',
-                    real_time: 'Firebase real-time updates'
                 }
             });
         }
 
-        // ============================================================
-        // ===== 404 =====
-        // ============================================================
         return sendJson(res, 404, { 
             error: 'Route not found',
             available: {
