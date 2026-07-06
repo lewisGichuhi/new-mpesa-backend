@@ -1,5 +1,5 @@
 /**
- * M-Pesa STK Push API - SIMPLIFIED VERSION
+ * M-Pesa STK Push API - FIXED FOR RENDER
  * Save this as server.js
  */
 
@@ -14,7 +14,6 @@ const { URL } = require('url');
 const SHORTCODE = '174379';
 const PASSKEY = 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919';
 
-// YOUR SAFARICOM CREDENTIALS
 const CONSUMER_KEY = '8jAAnvNAIwiBXEbJsAsKNZQZTBOg7QGRIdQzvWN3abVuCMtQ';
 const CONSUMER_SECRET = 'U3jAOtpJRDiOVj7w36Xa63EuuBT3fWGXXrWULxVBkBa22imOUrlA5l5CAuvvkPnn';
 
@@ -22,79 +21,115 @@ const CALLBACK_URL = 'https://new-mpesa-backend-1.onrender.com/api/mpesa-callbac
 const PORT = process.env.PORT || 10000;
 
 // ============================================================
-// ===================== SSL AGENT =====================
+// ===================== PERMISSIVE HTTPS AGENT =====================
 // ============================================================
 
 const agent = new https.Agent({
     rejectUnauthorized: false,
     keepAlive: true,
-    timeout: 60000
+    keepAliveMsecs: 1000,
+    maxSockets: 50,
+    maxFreeSockets: 10,
+    timeout: 120000,
+    // Force TLS 1.2
+    secureProtocol: 'TLSv1_2_method',
+    // Allow older ciphers
+    ciphers: 'ALL:!aNULL:!eNULL:!LOW:!EXPORT:!SSLv2',
+    honorCipherOrder: false
 });
 
 // ============================================================
-// ===================== SIMPLE REQUEST =====================
+// ===================== REQUEST WITH RETRY =====================
 // ============================================================
 
-function simpleRequest(method, urlString, headers = {}, jsonBody = null) {
+function requestWithRetry(method, urlString, headers = {}, jsonBody = null, retries = 3) {
     return new Promise((resolve, reject) => {
-        const url = new URL(urlString);
-        const payload = jsonBody ? JSON.stringify(jsonBody) : null;
+        const attempt = (attemptNumber) => {
+            console.log(`\n[ATTEMPT ${attemptNumber}/${retries}] ${method} ${urlString}`);
+            
+            const url = new URL(urlString);
+            const payload = jsonBody ? JSON.stringify(jsonBody) : null;
 
-        console.log(`\n[REQUEST] ${method} ${urlString}`);
-        console.log(`[REQUEST] Headers:`, JSON.stringify(headers, null, 2));
+            const options = {
+                hostname: url.hostname,
+                port: url.port || 443,
+                path: url.pathname + url.search,
+                method: method.toUpperCase(),
+                headers: {
+                    ...headers,
+                    ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+                    'Connection': 'keep-alive',
+                    'Accept': '*/*',
+                    'User-Agent': 'Mozilla/5.0 (compatible; TenantPortal/2.0)'
+                },
+                timeout: 90000,
+                agent: agent,
+                family: 4, // Force IPv4
+                lookup: (hostname, options, callback) => {
+                    // Try to resolve to a specific IP if needed
+                    callback(null, null, 4);
+                }
+            };
 
-        const options = {
-            hostname: url.hostname,
-            port: url.port || 443,
-            path: url.pathname + url.search,
-            method: method.toUpperCase(),
-            headers: {
-                ...headers,
-                ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
-                'Connection': 'keep-alive'
-            },
-            timeout: 60000,
-            agent: agent,
-            family: 4 // Force IPv4
-        };
+            console.log(`[OPTIONS] Host: ${options.hostname}, Path: ${options.path}`);
 
-        const req = https.request(options, (res) => {
-            let chunks = [];
-            res.on('data', (chunk) => chunks.push(chunk));
-            res.on('end', () => {
-                const bodyText = Buffer.concat(chunks).toString('utf8');
-                let bodyJson = null;
-                try { bodyJson = JSON.parse(bodyText); } catch (_) {}
-                
-                console.log(`[RESPONSE] Status: ${res.statusCode}`);
-                console.log(`[RESPONSE] Body: ${bodyText}`);
-                
-                resolve({
-                    statusCode: res.statusCode,
-                    statusMessage: res.statusMessage,
-                    bodyText,
-                    bodyJson
+            const req = https.request(options, (res) => {
+                let chunks = [];
+                res.on('data', (chunk) => chunks.push(chunk));
+                res.on('end', () => {
+                    const bodyText = Buffer.concat(chunks).toString('utf8');
+                    let bodyJson = null;
+                    try { bodyJson = JSON.parse(bodyText); } catch (_) {}
+                    
+                    console.log(`[RESPONSE] Status: ${res.statusCode}`);
+                    if (bodyText && bodyText.length < 500) {
+                        console.log(`[RESPONSE] Body: ${bodyText}`);
+                    }
+                    
+                    resolve({
+                        statusCode: res.statusCode,
+                        statusMessage: res.statusMessage,
+                        bodyText,
+                        bodyJson,
+                        attempt: attemptNumber
+                    });
                 });
             });
-        });
 
-        req.on('error', (err) => {
-            console.error('[REQUEST ERROR]', err.message);
-            console.error('[REQUEST ERROR] Code:', err.code);
-            reject(new Error(`Request failed: ${err.message} (${err.code || 'unknown code'})`));
-        });
-        
-        req.on('timeout', () => {
-            console.error('[REQUEST TIMEOUT] Request exceeded 60 seconds');
-            req.destroy();
-            reject(new Error('Request timed out after 60 seconds'));
-        });
+            req.on('error', (err) => {
+                console.error(`[ATTEMPT ${attemptNumber} ERROR]`, err.message);
+                console.error(`[ERROR CODE]`, err.code);
+                
+                if (attemptNumber < retries) {
+                    const delay = attemptNumber * 2000;
+                    console.log(`🔄 Retrying in ${delay/1000} seconds...`);
+                    setTimeout(() => attempt(attemptNumber + 1), delay);
+                } else {
+                    reject(new Error(`Request failed after ${retries} attempts: ${err.message} (${err.code || 'unknown'})`));
+                }
+            });
+            
+            req.on('timeout', () => {
+                console.error(`[ATTEMPT ${attemptNumber} TIMEOUT]`);
+                req.destroy();
+                
+                if (attemptNumber < retries) {
+                    const delay = attemptNumber * 2000;
+                    console.log(`🔄 Retrying in ${delay/1000} seconds...`);
+                    setTimeout(() => attempt(attemptNumber + 1), delay);
+                } else {
+                    reject(new Error(`Request timed out after ${retries} attempts`));
+                }
+            });
 
-        if (payload) {
-            console.log(`[PAYLOAD] ${payload.substring(0, 200)}...`);
-            req.write(payload);
-        }
-        req.end();
+            if (payload) {
+                console.log(`[PAYLOAD] ${payload.substring(0, 200)}...`);
+                req.write(payload);
+            }
+            req.end();
+        };
+
+        attempt(1);
     });
 }
 
@@ -104,17 +139,15 @@ function simpleRequest(method, urlString, headers = {}, jsonBody = null) {
 
 async function getAccessToken() {
     console.log('\n🔑 Getting access token...');
-    console.log(`📌 Consumer Key: ${CONSUMER_KEY.substring(0, 10)}...`);
     
     const auth = Buffer.from(`${CONSUMER_KEY.trim()}:${CONSUMER_SECRET.trim()}`).toString('base64');
 
-    const res = await simpleRequest(
+    const res = await requestWithRetry(
         'GET',
         'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
         {
             'Authorization': `Basic ${auth}`,
-            'Accept': 'application/json',
-            'User-Agent': 'TenantPortal/2.0'
+            'Accept': 'application/json'
         }
     );
 
@@ -173,14 +206,9 @@ async function stkPush({ phone, amount, accountReference }) {
     }
     console.log(`📱 Normalized: ${formattedPhone}`);
 
-    // Get token
-    console.log('📝 Getting access token...');
     const token = await getAccessToken();
-    console.log('✅ Token obtained');
-
     const timestamp = timestampNow();
     const password = Buffer.from(`${SHORTCODE}${PASSKEY}${timestamp}`).toString('base64');
-    console.log(`⏰ Timestamp: ${timestamp}`);
 
     const payload = {
         BusinessShortCode: SHORTCODE,
@@ -198,15 +226,15 @@ async function stkPush({ phone, amount, accountReference }) {
 
     console.log('📤 Sending STK Push to Safaricom...');
     
-    const res = await simpleRequest(
+    const res = await requestWithRetry(
         'POST',
         'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
         {
             'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'User-Agent': 'TenantPortal/2.0'
+            'Content-Type': 'application/json'
         },
-        payload
+        payload,
+        3
     );
 
     if (!res.bodyJson) {
@@ -323,6 +351,8 @@ const HTML_PAGE = `<!DOCTYPE html>
             font-size: 12px;
             color: #64748b;
             word-break: break-all;
+            max-height: 200px;
+            overflow-y: auto;
         }
         .server-status {
             text-align: center;
@@ -334,6 +364,12 @@ const HTML_PAGE = `<!DOCTYPE html>
         .server-status.online { background: rgba(16,185,129,0.1); color: #34d399; }
         .server-status.offline { background: rgba(244,63,94,0.1); color: #fb7185; }
         .server-status.checking { background: rgba(99,102,241,0.1); color: #a5b4fc; }
+        .note {
+            font-size: 11px;
+            color: #64748b;
+            text-align: center;
+            margin-top: 8px;
+        }
     </style>
 </head>
 <body>
@@ -352,12 +388,10 @@ const HTML_PAGE = `<!DOCTYPE html>
         <div id="status" class="status" style="background:#1e293b;color:#94a3b8;">Ready</div>
 
         <div class="debug" id="debugInfo">Server URL: <span id="serverUrl">Loading...</span></div>
+        <div class="note">⏱️ If payment fails, the server will retry automatically up to 3 times.</div>
     </div>
 
     <script>
-        // ============================================================
-        // SERVER URL
-        // ============================================================
         function getServerUrl() {
             const hostname = window.location.hostname;
             if (hostname === 'localhost' || hostname === '127.0.0.1') {
@@ -369,9 +403,6 @@ const HTML_PAGE = `<!DOCTYPE html>
         const SERVER_URL = getServerUrl();
         document.getElementById('serverUrl').textContent = SERVER_URL;
 
-        // ============================================================
-        // CHECK SERVER
-        // ============================================================
         async function checkServer() {
             const statusEl = document.getElementById('serverStatus');
             statusEl.textContent = '⏳ Checking server...';
@@ -395,9 +426,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             }
         }
 
-        // ============================================================
-        // SUBMIT PAYMENT
-        // ============================================================
         async function submitPayment() {
             const phone = document.getElementById('phoneInput').value.trim();
             const amount = document.getElementById('amountInput').value.trim();
@@ -420,7 +448,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             btn.textContent = 'Processing...';
             statusEl.textContent = 'Sending...';
             statusEl.className = 'status pending';
-            debugEl.textContent = 'Sending to: ' + SERVER_URL;
+            debugEl.textContent = '📤 Sending to: ' + SERVER_URL;
 
             try {
                 const payload = {
@@ -429,7 +457,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                     accountReference: 'TEST-001'
                 };
                 
-                debugEl.textContent = 'Payload: ' + JSON.stringify(payload);
+                debugEl.textContent = '📤 Payload: ' + JSON.stringify(payload);
 
                 const response = await fetch(SERVER_URL, {
                     method: 'POST',
@@ -438,7 +466,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                 });
 
                 const data = await response.json();
-                debugEl.textContent = 'Response: ' + JSON.stringify(data);
+                debugEl.textContent = '📥 Response: ' + JSON.stringify(data);
 
                 if (response.ok && data.success) {
                     statusEl.textContent = '✅ Payment sent! Check your phone.';
@@ -459,9 +487,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             }
         }
 
-        // ============================================================
-        // LOAD
-        // ============================================================
         document.addEventListener('DOMContentLoaded', function() {
             setTimeout(checkServer, 500);
         });
