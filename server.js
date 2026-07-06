@@ -1,6 +1,6 @@
 /**
- * M-Pesa STK Push API - Complete Working Version
- * Deployed on: https://new-mpesa-backend-1.onrender.com
+ * M-Pesa STK Push API - SIMPLIFIED VERSION
+ * Save this as server.js
  */
 
 const http = require('http');
@@ -18,9 +18,7 @@ const PASSKEY = 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c91
 const CONSUMER_KEY = '8jAAnvNAIwiBXEbJsAsKNZQZTBOg7QGRIdQzvWN3abVuCMtQ';
 const CONSUMER_SECRET = 'U3jAOtpJRDiOVj7w36Xa63EuuBT3fWGXXrWULxVBkBa22imOUrlA5l5CAuvvkPnn';
 
-// CALLBACK URL - FOR M-PESA TO SEND PAYMENT CONFIRMATIONS
 const CALLBACK_URL = 'https://new-mpesa-backend-1.onrender.com/api/mpesa-callback';
-
 const PORT = process.env.PORT || 10000;
 
 // ============================================================
@@ -30,54 +28,46 @@ const PORT = process.env.PORT || 10000;
 const agent = new https.Agent({
     rejectUnauthorized: false,
     keepAlive: true,
-    maxSockets: 50,
     timeout: 60000
 });
 
 // ============================================================
-// ===================== REQUEST HELPER =====================
+// ===================== SIMPLE REQUEST =====================
 // ============================================================
 
-function request(method, urlString, headers = {}, jsonBody = null) {
+function simpleRequest(method, urlString, headers = {}, jsonBody = null) {
     return new Promise((resolve, reject) => {
         const url = new URL(urlString);
         const payload = jsonBody ? JSON.stringify(jsonBody) : null;
 
         console.log(`\n[REQUEST] ${method} ${urlString}`);
-        
+        console.log(`[REQUEST] Headers:`, JSON.stringify(headers, null, 2));
+
         const options = {
             hostname: url.hostname,
+            port: url.port || 443,
             path: url.pathname + url.search,
             method: method.toUpperCase(),
             headers: {
                 ...headers,
-                ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
+                ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+                'Connection': 'keep-alive'
             },
-            timeout: 60000, // Increased to 60 seconds
-            agent: agent
+            timeout: 60000,
+            agent: agent,
+            family: 4 // Force IPv4
         };
 
         const req = https.request(options, (res) => {
             let chunks = [];
-            let responseSize = 0;
-
-            res.on('data', (chunk) => {
-                chunks.push(chunk);
-                responseSize += chunk.length;
-            });
-
+            res.on('data', (chunk) => chunks.push(chunk));
             res.on('end', () => {
                 const bodyText = Buffer.concat(chunks).toString('utf8');
                 let bodyJson = null;
                 try { bodyJson = JSON.parse(bodyText); } catch (_) {}
                 
                 console.log(`[RESPONSE] Status: ${res.statusCode}`);
-                console.log(`[RESPONSE] Size: ${responseSize} bytes`);
-                if (bodyText && bodyText.length < 500) {
-                    console.log(`[RESPONSE] Body: ${bodyText}`);
-                } else if (bodyText) {
-                    console.log(`[RESPONSE] Body: ${bodyText.substring(0, 300)}...`);
-                }
+                console.log(`[RESPONSE] Body: ${bodyText}`);
                 
                 resolve({
                     statusCode: res.statusCode,
@@ -91,7 +81,7 @@ function request(method, urlString, headers = {}, jsonBody = null) {
         req.on('error', (err) => {
             console.error('[REQUEST ERROR]', err.message);
             console.error('[REQUEST ERROR] Code:', err.code);
-            reject(new Error(`Request failed: ${err.message}`));
+            reject(new Error(`Request failed: ${err.message} (${err.code || 'unknown code'})`));
         });
         
         req.on('timeout', () => {
@@ -100,68 +90,9 @@ function request(method, urlString, headers = {}, jsonBody = null) {
             reject(new Error('Request timed out after 60 seconds'));
         });
 
-        req.on('socket', (socket) => {
-            socket.setTimeout(60000);
-            socket.on('timeout', () => {
-                console.error('[SOCKET TIMEOUT] Socket timed out');
-                req.destroy();
-                reject(new Error('Socket timed out'));
-            });
-        });
-        
         if (payload) {
-            console.log(`[PAYLOAD] Size: ${payload.length} bytes`);
+            console.log(`[PAYLOAD] ${payload.substring(0, 200)}...`);
             req.write(payload);
-        }
-        req.end();
-    });
-}
-
-// ============================================================
-// ===================== FIREBASE HELPER =====================
-// ============================================================
-
-function firebaseRequest(method, path, data = null) {
-    const FIREBASE_URL = 'https://rent-collection-1b773-default-rtdb.firebaseio.com';
-    const url = `${FIREBASE_URL}${path}.json`;
-    
-    return new Promise((resolve, reject) => {
-        const options = {
-            method: method,
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            timeout: 30000,
-            agent: agent
-        };
-
-        const req = https.request(url, options, (res) => {
-            let chunks = [];
-            res.on('data', (chunk) => chunks.push(chunk));
-            res.on('end', () => {
-                const bodyText = Buffer.concat(chunks).toString('utf8');
-                let bodyJson = null;
-                try { bodyJson = JSON.parse(bodyText); } catch (_) {}
-                resolve({
-                    statusCode: res.statusCode,
-                    bodyText,
-                    bodyJson
-                });
-            });
-        });
-
-        req.on('error', (err) => {
-            console.error('[FIREBASE ERROR]', err.message);
-            reject(err);
-        });
-
-        req.on('timeout', () => {
-            req.destroy();
-            reject(new Error('Firebase request timed out'));
-        });
-
-        if (data) {
-            req.write(JSON.stringify(data));
         }
         req.end();
     });
@@ -173,43 +104,30 @@ function firebaseRequest(method, path, data = null) {
 
 async function getAccessToken() {
     console.log('\n🔑 Getting access token...');
+    console.log(`📌 Consumer Key: ${CONSUMER_KEY.substring(0, 10)}...`);
     
     const auth = Buffer.from(`${CONSUMER_KEY.trim()}:${CONSUMER_SECRET.trim()}`).toString('base64');
 
-    try {
-        const res = await request(
-            'GET',
-            'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
-            {
-                'Authorization': `Basic ${auth}`,
-                'Accept': 'application/json',
-                'User-Agent': 'TenantPortal/2.0'
-            }
-        );
-
-        if (res.statusCode === 400) {
-            throw new Error('Authentication failed: Invalid credentials.');
+    const res = await simpleRequest(
+        'GET',
+        'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
+        {
+            'Authorization': `Basic ${auth}`,
+            'Accept': 'application/json',
+            'User-Agent': 'TenantPortal/2.0'
         }
+    );
 
-        if (res.statusCode === 401) {
-            throw new Error('Authentication failed: Unauthorized. Check your Consumer Key and Secret.');
-        }
-
-        if (res.statusCode !== 200) {
-            throw new Error(`HTTP ${res.statusCode}: ${res.bodyText}`);
-        }
-
-        if (!res.bodyJson || !res.bodyJson.access_token) {
-            throw new Error('No access token in response');
-        }
-
-        console.log('✅ Access token obtained');
-        console.log(`⏰ Expires in: ${res.bodyJson.expires_in || 'unknown'} seconds`);
-        return res.bodyJson.access_token;
-    } catch (error) {
-        console.error('❌ OAuth error:', error.message);
-        throw error;
+    if (res.statusCode !== 200) {
+        throw new Error(`OAuth failed (${res.statusCode}): ${res.bodyText}`);
     }
+
+    if (!res.bodyJson || !res.bodyJson.access_token) {
+        throw new Error('No access token in response');
+    }
+
+    console.log('✅ Access token obtained');
+    return res.bodyJson.access_token;
 }
 
 // ============================================================
@@ -243,175 +161,76 @@ async function stkPush({ phone, amount, accountReference }) {
     console.log('\n💳 Starting STK Push...');
     console.log(`📱 Phone: ${phone}`);
     console.log(`💰 Amount: ${amount}`);
-    console.log(`📝 Reference: ${accountReference || 'TenantPortal'}`);
 
-    try {
-        const numericAmount = Math.round(Number(amount));
-        if (isNaN(numericAmount) || numericAmount < 1) {
-            throw new Error('Invalid amount');
-        }
-
-        const formattedPhone = normalizePhone(phone);
-        if (!formattedPhone || formattedPhone.length < 10) {
-            throw new Error(`Invalid phone: ${phone}`);
-        }
-        console.log(`📱 Normalized: ${formattedPhone}`);
-
-        // Get token with retry
-        let token;
-        try {
-            token = await getAccessToken();
-        } catch (error) {
-            console.error('❌ Failed to get access token:', error.message);
-            throw new Error(`Authentication failed: ${error.message}`);
-        }
-
-        const timestamp = timestampNow();
-        const password = Buffer.from(`${SHORTCODE}${PASSKEY}${timestamp}`).toString('base64');
-
-        const payload = {
-            BusinessShortCode: SHORTCODE,
-            Password: password,
-            Timestamp: timestamp,
-            TransactionType: 'CustomerPayBillOnline',
-            Amount: numericAmount,
-            PartyA: formattedPhone,
-            PartyB: SHORTCODE,
-            PhoneNumber: formattedPhone,
-            CallBackURL: CALLBACK_URL,
-            AccountReference: accountReference || 'TenantPortal',
-            TransactionDesc: 'Rent Payment'
-        };
-
-        console.log('📤 Sending STK Push request to Safaricom...');
-        
-        const res = await request(
-            'POST',
-            'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
-            {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json',
-                'User-Agent': 'TenantPortal/2.0'
-            },
-            payload
-        );
-
-        if (!res.bodyJson) {
-            throw new Error('Invalid response from Safaricom - no JSON returned');
-        }
-
-        console.log(`📊 Response Code: ${res.bodyJson.ResponseCode}`);
-        console.log(`📝 Response Description: ${res.bodyJson.ResponseDescription}`);
-        console.log(`📝 CheckoutRequestID: ${res.bodyJson.CheckoutRequestID || 'N/A'}`);
-
-        if (res.bodyJson.ResponseCode === '0') {
-            console.log('✅ STK Push successful!');
-            return {
-                success: true,
-                data: res.bodyJson,
-                message: res.bodyJson.CustomerMessage || 'STK Push sent successfully'
-            };
-        } else {
-            const errorMsg = res.bodyJson.ResponseDescription || 
-                            res.bodyJson.CustomerMessage || 
-                            res.bodyJson.errorMessage ||
-                            'STK Push failed';
-            throw new Error(errorMsg);
-        }
-    } catch (error) {
-        console.error('❌ STK Push error:', error.message);
-        throw error;
+    const numericAmount = Math.round(Number(amount));
+    if (isNaN(numericAmount) || numericAmount < 1) {
+        throw new Error('Invalid amount');
     }
-}
 
-// ============================================================
-// ===================== M-PESA CALLBACK HANDLER =====================
-// ============================================================
+    const formattedPhone = normalizePhone(phone);
+    if (!formattedPhone || formattedPhone.length < 10) {
+        throw new Error(`Invalid phone: ${phone}`);
+    }
+    console.log(`📱 Normalized: ${formattedPhone}`);
 
-async function handleMpesaCallback(callbackData) {
-    console.log('\n📥 Processing M-Pesa Callback...');
+    // Get token
+    console.log('📝 Getting access token...');
+    const token = await getAccessToken();
+    console.log('✅ Token obtained');
 
-    try {
-        const stkCallback = callbackData.Body?.stkCallback;
-        
-        if (!stkCallback) {
-            console.log('❌ Invalid callback structure');
-            return { success: false, error: 'Invalid callback structure' };
-        }
+    const timestamp = timestampNow();
+    const password = Buffer.from(`${SHORTCODE}${PASSKEY}${timestamp}`).toString('base64');
+    console.log(`⏰ Timestamp: ${timestamp}`);
 
-        const resultCode = stkCallback.ResultCode;
-        const resultDesc = stkCallback.ResultDesc;
-        const checkoutRequestId = stkCallback.CheckoutRequestID;
+    const payload = {
+        BusinessShortCode: SHORTCODE,
+        Password: password,
+        Timestamp: timestamp,
+        TransactionType: 'CustomerPayBillOnline',
+        Amount: numericAmount,
+        PartyA: formattedPhone,
+        PartyB: SHORTCODE,
+        PhoneNumber: formattedPhone,
+        CallBackURL: CALLBACK_URL,
+        AccountReference: accountReference || 'TenantPortal',
+        TransactionDesc: 'Rent Payment'
+    };
 
-        console.log(`📊 Result Code: ${resultCode}`);
-        console.log(`📝 Result Description: ${resultDesc}`);
-        console.log(`📝 CheckoutRequestID: ${checkoutRequestId}`);
+    console.log('📤 Sending STK Push to Safaricom...');
+    
+    const res = await simpleRequest(
+        'POST',
+        'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+        {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            'User-Agent': 'TenantPortal/2.0'
+        },
+        payload
+    );
 
-        if (resultCode !== '0') {
-            console.log(`❌ Payment failed: ${resultDesc}`);
-            return { success: false, error: resultDesc };
-        }
+    if (!res.bodyJson) {
+        throw new Error('Invalid response from Safaricom');
+    }
 
-        const metadata = stkCallback.CallbackMetadata?.Item || [];
-        
-        const getItem = (name) => {
-            const item = metadata.find(i => i.Name === name);
-            return item ? item.Value : null;
-        };
+    console.log(`📊 Response Code: ${res.bodyJson.ResponseCode}`);
+    console.log(`📝 Description: ${res.bodyJson.ResponseDescription}`);
 
-        const amount = getItem('Amount');
-        const phone = getItem('PhoneNumber');
-        const accountReference = getItem('AccountReference') || 'Unknown';
-        const transactionId = getItem('TransactionId') || checkoutRequestId;
-
-        console.log(`💰 Amount: ${amount}`);
-        console.log(`📱 Phone: ${phone}`);
-        console.log(`📝 Account Reference: ${accountReference}`);
-
-        if (!amount || !phone) {
-            console.log('❌ Missing amount or phone in callback');
-            return { success: false, error: 'Missing payment details' };
-        }
-
-        // Save to Firebase
-        const today = new Date().toISOString().slice(0, 10);
-        const tenantId = accountReference.toString().trim();
-        
-        const paymentData = {
-            date: today,
-            amount: amount,
-            phone: phone,
-            transactionId: transactionId,
-            checkoutRequestId: checkoutRequestId,
-            source: 'M-Pesa Auto',
-            timestamp: new Date().toISOString(),
-            resultCode: resultCode,
-            resultDesc: resultDesc
-        };
-
-        console.log(`💾 Saving payment to Firebase for tenant: ${tenantId}`);
-
-        const saveResult = await firebaseRequest(
-            'POST',
-            `/tenant_ledger/${tenantId}/payments`,
-            paymentData
-        );
-
-        console.log('✅ Payment automatically recorded in Firebase!');
+    if (res.bodyJson.ResponseCode === '0') {
+        console.log('✅ STK Push successful!');
         return {
             success: true,
-            message: 'Payment recorded successfully',
-            data: paymentData
+            data: res.bodyJson,
+            message: res.bodyJson.CustomerMessage || 'STK Push sent'
         };
-
-    } catch (error) {
-        console.error('❌ Error processing callback:', error.message);
-        return { success: false, error: error.message };
+    } else {
+        const errorMsg = res.bodyJson.ResponseDescription || res.bodyJson.CustomerMessage || 'STK Push failed';
+        throw new Error(errorMsg);
     }
 }
 
 // ============================================================
-// ===================== SERVER =====================
+// ===================== SERVER FUNCTIONS =====================
 // ============================================================
 
 function sendJson(res, statusCode, obj) {
@@ -437,244 +256,221 @@ function readBody(req) {
 }
 
 // ============================================================
-// ===================== HTML PAGE =====================
+// ===================== TEST HTML =====================
 // ============================================================
 
 const HTML_PAGE = `<!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tenant Portal - M-Pesa Payment</title>
+    <title>Payment Test</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            font-family: Arial, sans-serif;
             background: #0f172a;
-            min-height: 100vh;
             display: flex;
-            align-items: center;
             justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
             padding: 20px;
-            color: #f8fafc;
-            line-height: 1.6;
+            color: white;
         }
-        .container { width: 100%; max-width: 440px; }
         .card {
-            background: rgba(30, 41, 59, 0.85);
-            backdrop-filter: blur(16px);
-            padding: 32px 28px;
-            border-radius: 24px;
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            background: #1e293b;
+            padding: 30px;
+            border-radius: 16px;
+            max-width: 400px;
+            width: 100%;
+            border: 1px solid #334155;
         }
-        .header { text-align: center; margin-bottom: 24px; }
-        .header .logo { font-size: 42px; margin-bottom: 4px; display: block; }
-        .header h1 { font-size: 20px; font-weight: 700; color: #f8fafc; }
-        .header .sub { color: #94a3b8; font-size: 12px; margin-top: 2px; }
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: 600;
-            font-size: 11px;
-            color: #94a3b8;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
+        h1 { text-align: center; }
+        label { display: block; margin: 10px 0 5px; font-size: 14px; color: #94a3b8; }
         input {
             width: 100%;
-            padding: 14px 16px;
-            margin-bottom: 14px;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 12px;
+            padding: 12px;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            background: #0f172a;
+            color: white;
             font-size: 16px;
-            background: rgba(15, 23, 42, 0.6);
-            color: #f8fafc;
-            transition: all 0.3s;
             box-sizing: border-box;
         }
-        input:focus {
-            outline: none;
-            border-color: #6366f1;
-            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
-            background: rgba(15, 23, 42, 0.8);
-        }
-        input::placeholder { color: #64748b; }
-        .btn-primary {
+        button {
             width: 100%;
-            padding: 16px;
-            background: linear-gradient(135deg, #10b981, #059669);
+            padding: 14px;
+            background: #10b981;
             color: white;
             border: none;
-            border-radius: 12px;
-            cursor: pointer;
-            font-weight: 700;
-            font-size: 16px;
-            transition: all 0.3s;
-            box-shadow: 0 4px 20px rgba(16, 185, 129, 0.25);
-        }
-        .btn-primary:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 25px rgba(16, 185, 129, 0.35); }
-        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-        .status {
-            font-size: 13px;
-            text-align: center;
-            margin-top: 12px;
-            min-height: 20px;
-            font-weight: 600;
-        }
-        .status.success { color: #34d399; }
-        .status.error { color: #fb7185; }
-        .status.pending { color: #a5b4fc; }
-        .footer {
-            text-align: center;
-            margin-top: 16px;
-            font-size: 10px;
-            color: #475569;
-        }
-        .server-info {
-            background: rgba(15, 23, 42, 0.5);
             border-radius: 8px;
-            padding: 8px 12px;
-            margin-bottom: 16px;
-            font-size: 11px;
-            color: #64748b;
-            text-align: center;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 10px;
         }
-        .server-info strong { color: #34d399; }
+        button:hover { background: #059669; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .status { margin-top: 10px; padding: 10px; border-radius: 8px; text-align: center; }
+        .success { background: #065f46; color: #34d399; }
+        .error { background: #7f1d1d; color: #fb7185; }
+        .pending { background: #1e3a5f; color: #60a5fa; }
+        .debug {
+            margin-top: 15px;
+            padding: 10px;
+            background: #0f172a;
+            border-radius: 8px;
+            font-size: 12px;
+            color: #64748b;
+            word-break: break-all;
+        }
+        .server-status {
+            text-align: center;
+            padding: 8px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            font-size: 13px;
+        }
+        .server-status.online { background: rgba(16,185,129,0.1); color: #34d399; }
+        .server-status.offline { background: rgba(244,63,94,0.1); color: #fb7185; }
+        .server-status.checking { background: rgba(99,102,241,0.1); color: #a5b4fc; }
     </style>
 </head>
 <body>
-<div class="container">
     <div class="card">
-        <div class="header">
-            <span class="logo">🏢</span>
-            <h1>Tenant Portal</h1>
-            <p class="sub">M-Pesa Payment</p>
-        </div>
-        <div class="server-info">
-            ✅ Server: <strong id="serverStatus">Checking...</strong> | 
-            URL: <span id="serverUrl">Loading...</span>
-        </div>
-        <label for="phoneInput">M-Pesa Phone Number</label>
-        <input type="tel" id="phoneInput" placeholder="0712345678" pattern="[0-9]*" inputmode="numeric">
-        <label for="amountInput">Amount (KES)</label>
-        <input type="number" id="amountInput" placeholder="Enter amount" min="1">
-        <button class="btn-primary" id="actionBtn" onclick="submitPayment()">💳 Pay Now</button>
-        <div class="status" id="actionStatus"></div>
-        <div class="footer">&copy; 2024 Your Property Management Ltd</div>
+        <h1>🏢 Payment Test</h1>
+        
+        <div id="serverStatus" class="server-status checking">⏳ Checking server...</div>
+
+        <label>Phone Number</label>
+        <input type="tel" id="phoneInput" placeholder="0712345678">
+
+        <label>Amount (KES)</label>
+        <input type="number" id="amountInput" placeholder="10">
+
+        <button id="payBtn" onclick="submitPayment()">💳 Pay Now</button>
+        <div id="status" class="status" style="background:#1e293b;color:#94a3b8;">Ready</div>
+
+        <div class="debug" id="debugInfo">Server URL: <span id="serverUrl">Loading...</span></div>
     </div>
-</div>
-<script>
-// ============================================================
-// SERVER URL
-// ============================================================
-function getServerUrl() {
-    const hostname = window.location.hostname;
-    if (hostname === 'localhost' || hostname === '127.0.0.1') {
-        return 'http://localhost:10000/api/stkpush';
-    }
-    return 'https://new-mpesa-backend-1.onrender.com/api/stkpush';
-}
 
-const PAYMENT_SERVER_URL = getServerUrl();
-document.getElementById('serverUrl').textContent = PAYMENT_SERVER_URL;
-
-// ============================================================
-// CHECK SERVER STATUS
-// ============================================================
-async function checkServerStatus() {
-    const statusEl = document.getElementById('serverStatus');
-    try {
-        const healthUrl = PAYMENT_SERVER_URL.replace('/api/stkpush', '/api/health');
-        const response = await fetch(healthUrl);
-        if (response.ok) {
-            statusEl.textContent = 'Connected ✅';
-            statusEl.style.color = '#34d399';
-        } else {
-            statusEl.textContent = 'Error ⚠️';
-            statusEl.style.color = '#fb7185';
+    <script>
+        // ============================================================
+        // SERVER URL
+        // ============================================================
+        function getServerUrl() {
+            const hostname = window.location.hostname;
+            if (hostname === 'localhost' || hostname === '127.0.0.1') {
+                return 'http://localhost:10000/api/stkpush';
+            }
+            return 'https://new-mpesa-backend-1.onrender.com/api/stkpush';
         }
-    } catch (error) {
-        statusEl.textContent = 'Disconnected ❌';
-        statusEl.style.color = '#fb7185';
-        console.error('Server check failed:', error);
-    }
-}
 
-// ============================================================
-// SUBMIT PAYMENT
-// ============================================================
-async function submitPayment() {
-    const phone = document.getElementById('phoneInput').value.trim();
-    const amount = document.getElementById('amountInput').value.trim();
-    const statusEl = document.getElementById('actionStatus');
-    const btn = document.getElementById('actionBtn');
+        const SERVER_URL = getServerUrl();
+        document.getElementById('serverUrl').textContent = SERVER_URL;
 
-    if (!phone) {
-        statusEl.textContent = 'Please enter your phone number.';
-        statusEl.className = 'status error';
-        return;
-    }
-    if (!amount || Number(amount) <= 0) {
-        statusEl.textContent = 'Please enter a valid amount.';
-        statusEl.className = 'status error';
-        return;
-    }
+        // ============================================================
+        // CHECK SERVER
+        // ============================================================
+        async function checkServer() {
+            const statusEl = document.getElementById('serverStatus');
+            statusEl.textContent = '⏳ Checking server...';
+            statusEl.className = 'server-status checking';
+            
+            try {
+                const healthUrl = SERVER_URL.replace('/api/stkpush', '/api/health');
+                const response = await fetch(healthUrl);
+                const data = await response.json();
+                
+                if (response.ok) {
+                    statusEl.textContent = '✅ Server Online';
+                    statusEl.className = 'server-status online';
+                } else {
+                    statusEl.textContent = '❌ Server Error: ' + response.status;
+                    statusEl.className = 'server-status offline';
+                }
+            } catch (error) {
+                statusEl.textContent = '❌ Cannot reach server: ' + error.message;
+                statusEl.className = 'server-status offline';
+            }
+        }
 
-    btn.disabled = true;
-    btn.textContent = 'Processing...';
-    statusEl.textContent = 'Sending payment request...';
-    statusEl.className = 'status pending';
+        // ============================================================
+        // SUBMIT PAYMENT
+        // ============================================================
+        async function submitPayment() {
+            const phone = document.getElementById('phoneInput').value.trim();
+            const amount = document.getElementById('amountInput').value.trim();
+            const statusEl = document.getElementById('status');
+            const btn = document.getElementById('payBtn');
+            const debugEl = document.getElementById('debugInfo');
 
-    try {
-        console.log('📤 Sending to:', PAYMENT_SERVER_URL);
-        console.log('📤 Payload:', { phone, amount });
+            if (!phone) {
+                statusEl.textContent = 'Please enter your phone number.';
+                statusEl.className = 'status error';
+                return;
+            }
+            if (!amount || Number(amount) <= 0) {
+                statusEl.textContent = 'Please enter a valid amount.';
+                statusEl.className = 'status error';
+                return;
+            }
 
-        const response = await fetch(PAYMENT_SERVER_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                phone: phone,
-                amount: amount,
-                houseId: 'TENANT-001',
-                accountReference: '001'
-            })
+            btn.disabled = true;
+            btn.textContent = 'Processing...';
+            statusEl.textContent = 'Sending...';
+            statusEl.className = 'status pending';
+            debugEl.textContent = 'Sending to: ' + SERVER_URL;
+
+            try {
+                const payload = {
+                    phone: phone,
+                    amount: amount,
+                    accountReference: 'TEST-001'
+                };
+                
+                debugEl.textContent = 'Payload: ' + JSON.stringify(payload);
+
+                const response = await fetch(SERVER_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await response.json();
+                debugEl.textContent = 'Response: ' + JSON.stringify(data);
+
+                if (response.ok && data.success) {
+                    statusEl.textContent = '✅ Payment sent! Check your phone.';
+                    statusEl.className = 'status success';
+                    document.getElementById('phoneInput').value = '';
+                    document.getElementById('amountInput').value = '';
+                } else {
+                    statusEl.textContent = '❌ Failed: ' + (data.error || data.message || 'Unknown');
+                    statusEl.className = 'status error';
+                }
+            } catch (error) {
+                debugEl.textContent = '❌ Error: ' + error.message;
+                statusEl.textContent = '❌ Error: ' + error.message;
+                statusEl.className = 'status error';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '💳 Pay Now';
+            }
+        }
+
+        // ============================================================
+        // LOAD
+        // ============================================================
+        document.addEventListener('DOMContentLoaded', function() {
+            setTimeout(checkServer, 500);
         });
-
-        const data = await response.json();
-        console.log('📥 Response:', data);
-
-        if (response.ok && data.success) {
-            statusEl.textContent = '✅ Payment sent! Check your phone for the M-Pesa prompt.';
-            statusEl.className = 'status success';
-            document.getElementById('phoneInput').value = '';
-            document.getElementById('amountInput').value = '';
-        } else {
-            statusEl.textContent = '❌ Payment failed: ' + (data.error || data.message || 'Unknown error');
-            statusEl.className = 'status error';
-        }
-    } catch (error) {
-        console.error('❌ Error:', error);
-        statusEl.textContent = '❌ Could not connect. Please try again.';
-        statusEl.className = 'status error';
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '💳 Pay Now';
-    }
-}
-
-// ============================================================
-// CHECK SERVER ON LOAD
-// ============================================================
-document.addEventListener('DOMContentLoaded', function() {
-    setTimeout(checkServerStatus, 1000);
-});
-</script>
+    </script>
 </body>
 </html>`;
 
 // ============================================================
-// ===================== SERVER =====================
+// ===================== CREATE SERVER =====================
 // ============================================================
 
 const server = http.createServer(async (req, res) => {
@@ -691,18 +487,14 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
     try {
-        // ============================================================
         // ===== SERVE HTML =====
-        // ============================================================
         if (req.method === 'GET' && url.pathname === '/') {
             res.writeHead(200, { 'Content-Type': 'text/html' });
             res.end(HTML_PAGE);
             return;
         }
 
-        // ============================================================
-        // ===== HEALTH CHECK =====
-        // ============================================================
+        // ===== HEALTH =====
         if (req.method === 'GET' && url.pathname === '/api/health') {
             return sendJson(res, 200, { 
                 status: 'ok', 
@@ -711,9 +503,7 @@ const server = http.createServer(async (req, res) => {
             });
         }
 
-        // ============================================================
         // ===== TEST OAUTH =====
-        // ============================================================
         if (req.method === 'GET' && url.pathname === '/api/test-oauth') {
             try {
                 const token = await getAccessToken();
@@ -729,51 +519,7 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
-        // ============================================================
-        // ===== M-PESA CALLBACK =====
-        // ============================================================
-        if (req.method === 'POST' && url.pathname === '/api/mpesa-callback') {
-            console.log('\n📥 M-Pesa Callback received!');
-            const body = await readBody(req);
-            console.log('📥 Full callback body:', JSON.stringify(body, null, 2));
-            
-            try {
-                await handleMpesaCallback(body);
-                return sendJson(res, 200, {
-                    ResultCode: 0,
-                    ResultDesc: 'Callback received successfully'
-                });
-            } catch (error) {
-                console.error('❌ Callback error:', error.message);
-                return sendJson(res, 200, {
-                    ResultCode: 0,
-                    ResultDesc: 'Callback received'
-                });
-            }
-        }
-
-        // ============================================================
-        // ===== TEST STK =====
-        // ============================================================
-        if (req.method === 'POST' && url.pathname === '/api/test-stk') {
-            try {
-                const result = await stkPush({
-                    phone: '254712345678',
-                    amount: '10',
-                    accountReference: 'TEST-001'
-                });
-                return sendJson(res, 200, result);
-            } catch (err) {
-                return sendJson(res, 502, { 
-                    success: false, 
-                    error: err.message 
-                });
-            }
-        }
-
-        // ============================================================
-        // ===== PRODUCTION STK PUSH =====
-        // ============================================================
+        // ===== STK PUSH =====
         if (req.method === 'POST' && url.pathname === '/api/stkpush') {
             const body = await readBody(req);
             console.log('📥 STK Push request:', body);
@@ -789,7 +535,7 @@ const server = http.createServer(async (req, res) => {
                 const result = await stkPush({
                     phone: body.phone,
                     amount: body.amount,
-                    accountReference: body.accountReference || body.houseId || 'TenantPortal'
+                    accountReference: body.accountReference || 'TenantPortal'
                 });
                 return sendJson(res, 200, result);
             } catch (err) {
@@ -801,49 +547,30 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
-        // ============================================================
-        // ===== ROOT API =====
-        // ============================================================
+        // ===== API INFO =====
         if (req.method === 'GET' && url.pathname === '/api') {
             return sendJson(res, 200, {
                 name: 'M-Pesa STK Push API',
                 status: 'Running',
-                version: '2.0.0',
                 endpoints: {
-                    home: 'GET / - HTML Page',
+                    home: 'GET /',
                     health: 'GET /api/health',
                     test_oauth: 'GET /api/test-oauth',
-                    test_stk: 'POST /api/test-stk',
-                    stkpush: 'POST /api/stkpush',
-                    callback: 'POST /api/mpesa-callback'
+                    stkpush: 'POST /api/stkpush'
                 }
             });
         }
 
-        return sendJson(res, 404, { 
-            error: 'Route not found',
-            available: {
-                '/': 'HTML Page',
-                '/api': 'API Info',
-                '/api/health': 'Health Check',
-                '/api/test-oauth': 'Test OAuth',
-                '/api/test-stk': 'Test STK (POST)',
-                '/api/stkpush': 'STK Push (POST)',
-                '/api/mpesa-callback': 'M-Pesa Callback (POST)'
-            }
-        });
+        return sendJson(res, 404, { error: 'Route not found' });
 
     } catch (err) {
         console.error('Server error:', err);
-        return sendJson(res, 500, { 
-            error: 'Internal server error',
-            message: err.message 
-        });
+        return sendJson(res, 500, { error: 'Internal server error' });
     }
 });
 
 // ============================================================
-// ===================== START SERVER =====================
+// ===================== START =====================
 // ============================================================
 
 server.listen(PORT, '0.0.0.0', () => {
@@ -851,17 +578,11 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log('🚀 M-Pesa STK Push API');
     console.log('========================================');
     console.log(`✅ Server running on port: ${PORT}`);
-    console.log(`📍 Home: http://localhost:${PORT}/`);
-    console.log(`📍 Health: http://localhost:${PORT}/api/health`);
-    console.log(`📍 OAuth: http://localhost:${PORT}/api/test-oauth`);
-    console.log(`📍 STK: POST /api/stkpush`);
-    console.log(`📍 Callback: POST /api/mpesa-callback`);
+    console.log(`📍 http://localhost:${PORT}/`);
+    console.log(`📍 http://localhost:${PORT}/api/health`);
+    console.log(`📍 http://localhost:${PORT}/api/test-oauth`);
     console.log('========================================\n');
 });
-
-// ============================================================
-// ===================== ERROR HANDLERS =====================
-// ============================================================
 
 process.on('uncaughtException', (err) => {
     console.error('❌ Uncaught Exception:', err);
