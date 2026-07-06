@@ -1,30 +1,50 @@
 /**
  * M-Pesa STK Push API - Complete Working Version
  * Deployed on: https://new-mpesa-backend-1.onrender.com
+ * 
+ * Features:
+ * - OAuth authentication with Safaricom
+ * - STK Push payment requests
+ * - M-Pesa callback handling for auto-recording payments
+ * - Real-time Firebase updates
+ * - CORS enabled for all origins
  */
 
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 
+// ============================================================
 // ===================== CONFIGURATION =====================
+// ============================================================
+
 const SHORTCODE = '174379';
 const PASSKEY = 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919';
 
-// YOUR CREDENTIALS
+// YOUR SAFARICOM CREDENTIALS
 const CONSUMER_KEY = '8jAAnvNAIwiBXEbJsAsKNZQZTBOg7QGRIdQzvWN3abVuCMtQ';
 const CONSUMER_SECRET = 'U3jAOtpJRDiOVj7w36Xa63EuuBT3fWGXXrWULxVBkBa22imOUrlA5l5CAuvvkPnn';
 
-const CALLBACK_URL = 'https://your-domain.com/callback';
+// CALLBACK URL - FOR M-PESA TO SEND PAYMENT CONFIRMATIONS
+// REPLACE WITH YOUR ACTUAL RENDER URL
+const CALLBACK_URL = 'https://new-mpesa-backend-1.onrender.com/api/mpesa-callback';
+
+// PORT
 const PORT = process.env.PORT || 10000;
 
-// SSL Agent
+// ============================================================
+// ===================== SSL AGENT =====================
+// ============================================================
+
 const agent = new https.Agent({
     rejectUnauthorized: false,
     keepAlive: true
 });
 
+// ============================================================
 // ===================== REQUEST HELPER =====================
+// ============================================================
+
 function request(method, urlString, headers = {}, jsonBody = null) {
     return new Promise((resolve, reject) => {
         const url = new URL(urlString);
@@ -81,7 +101,54 @@ function request(method, urlString, headers = {}, jsonBody = null) {
     });
 }
 
+// ============================================================
+// ===================== FIREBASE HELPER =====================
+// ============================================================
+
+// Firebase REST API helper functions
+function firebaseRequest(method, path, data = null) {
+    const FIREBASE_URL = 'https://rent-collection-1b773-default-rtdb.firebaseio.com';
+    const url = `${FIREBASE_URL}${path}.json`;
+    
+    return new Promise((resolve, reject) => {
+        const options = {
+            method: method,
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        };
+
+        const req = https.request(url, options, (res) => {
+            let chunks = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('end', () => {
+                const bodyText = Buffer.concat(chunks).toString('utf8');
+                let bodyJson = null;
+                try { bodyJson = JSON.parse(bodyText); } catch (_) {}
+                resolve({
+                    statusCode: res.statusCode,
+                    bodyText,
+                    bodyJson
+                });
+            });
+        });
+
+        req.on('error', (err) => {
+            console.error('[FIREBASE ERROR]', err.message);
+            reject(err);
+        });
+
+        if (data) {
+            req.write(JSON.stringify(data));
+        }
+        req.end();
+    });
+}
+
+// ============================================================
 // ===================== OAUTH =====================
+// ============================================================
+
 async function getAccessToken() {
     console.log('\n🔑 Getting access token...');
     
@@ -112,7 +179,10 @@ async function getAccessToken() {
     return res.bodyJson.access_token;
 }
 
+// ============================================================
 // ===================== HELPERS =====================
+// ============================================================
+
 function timestampNow() {
     const now = new Date();
     const pad = (n) => String(n).padStart(2, '0');
@@ -132,11 +202,15 @@ function normalizePhone(rawPhone) {
     return digits;
 }
 
+// ============================================================
 // ===================== STK PUSH =====================
+// ============================================================
+
 async function stkPush({ phone, amount, accountReference }) {
     console.log('\n💳 Starting STK Push...');
     console.log(`📱 Phone: ${phone}`);
     console.log(`💰 Amount: ${amount}`);
+    console.log(`📝 Reference: ${accountReference || 'TenantPortal'}`);
 
     const numericAmount = Math.round(Number(amount));
     if (isNaN(numericAmount) || numericAmount < 1) {
@@ -184,6 +258,8 @@ async function stkPush({ phone, amount, accountReference }) {
     }
 
     console.log(`📊 Response Code: ${res.bodyJson.ResponseCode}`);
+    console.log(`📝 Response Description: ${res.bodyJson.ResponseDescription}`);
+    console.log(`📝 CheckoutRequestID: ${res.bodyJson.CheckoutRequestID}`);
 
     if (res.bodyJson.ResponseCode === '0') {
         console.log('✅ STK Push successful!');
@@ -198,7 +274,111 @@ async function stkPush({ phone, amount, accountReference }) {
     }
 }
 
+// ============================================================
+// ===================== M-PESA CALLBACK HANDLER =====================
+// ============================================================
+
+async function handleMpesaCallback(callbackData) {
+    console.log('\n📥 Processing M-Pesa Callback...');
+    console.log('📥 Callback Data:', JSON.stringify(callbackData, null, 2));
+
+    try {
+        const stkCallback = callbackData.Body?.stkCallback;
+        
+        if (!stkCallback) {
+            console.log('❌ Invalid callback structure');
+            return { success: false, error: 'Invalid callback structure' };
+        }
+
+        const resultCode = stkCallback.ResultCode;
+        const resultDesc = stkCallback.ResultDesc;
+        const checkoutRequestId = stkCallback.CheckoutRequestID;
+
+        console.log(`📊 Result Code: ${resultCode}`);
+        console.log(`📝 Result Description: ${resultDesc}`);
+        console.log(`📝 CheckoutRequestID: ${checkoutRequestId}`);
+
+        // Check if payment was successful (ResultCode === 0 means success)
+        if (resultCode !== '0') {
+            console.log(`❌ Payment failed: ${resultDesc}`);
+            return { success: false, error: resultDesc };
+        }
+
+        // Extract payment details from callback metadata
+        const metadata = stkCallback.CallbackMetadata?.Item || [];
+        
+        const getItem = (name) => {
+            const item = metadata.find(i => i.Name === name);
+            return item ? item.Value : null;
+        };
+
+        const amount = getItem('Amount');
+        const phone = getItem('PhoneNumber');
+        const accountReference = getItem('AccountReference') || 'Unknown';
+        const transactionId = getItem('TransactionId') || checkoutRequestId;
+
+        console.log(`💰 Amount: ${amount}`);
+        console.log(`📱 Phone: ${phone}`);
+        console.log(`📝 Account Reference: ${accountReference}`);
+        console.log(`🔢 Transaction ID: ${transactionId}`);
+
+        if (!amount || !phone) {
+            console.log('❌ Missing amount or phone in callback');
+            return { success: false, error: 'Missing payment details' };
+        }
+
+        // ==== SAVE TO FIREBASE AUTOMATICALLY ====
+        const today = new Date().toISOString().slice(0, 10);
+        
+        // Find the tenant ID from account reference
+        // If accountReference is like "001", use it directly
+        const tenantId = accountReference.toString().trim();
+        
+        // Save the payment to Firebase
+        const paymentData = {
+            date: today,
+            amount: amount,
+            phone: phone,
+            transactionId: transactionId,
+            checkoutRequestId: checkoutRequestId,
+            source: 'M-Pesa Auto',
+            timestamp: new Date().toISOString(),
+            resultCode: resultCode,
+            resultDesc: resultDesc
+        };
+
+        console.log(`💾 Saving payment to Firebase for tenant: ${tenantId}`);
+        console.log(`💾 Payment data:`, paymentData);
+
+        // Save to Firebase using REST API
+        const saveResult = await firebaseRequest(
+            'POST',
+            `/tenant_ledger/${tenantId}/payments`,
+            paymentData
+        );
+
+        console.log('✅ Payment automatically recorded in Firebase!');
+        console.log('📊 Save result:', saveResult);
+
+        // Also update the lastMonth/current if needed?
+        // Optional: You can also update the tenant's balance here
+
+        return {
+            success: true,
+            message: 'Payment recorded successfully',
+            data: paymentData
+        };
+
+    } catch (error) {
+        console.error('❌ Error processing callback:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================
 // ===================== SERVER =====================
+// ============================================================
+
 function sendJson(res, statusCode, obj) {
     res.writeHead(statusCode, { 
         'Content-Type': 'application/json',
@@ -222,8 +402,9 @@ function readBody(req) {
 }
 
 // ============================================================
-// HTML PAGE (built-in - with Render URL)
+// ===================== HTML PAGE =====================
 // ============================================================
+
 const HTML_PAGE = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -349,25 +530,17 @@ const HTML_PAGE = `<!DOCTYPE html>
     </div>
 </div>
 <script>
-// ============================================================
-// SERVER URL - FIXED for Render
-// ============================================================
 function getServerUrl() {
     const hostname = window.location.hostname;
-    // If on localhost, use localhost
     if (hostname === 'localhost' || hostname === '127.0.0.1') {
         return 'http://localhost:10000/api/stkpush';
     }
-    // For Render deployment
     return 'https://new-mpesa-backend-1.onrender.com/api/stkpush';
 }
 
 const PAYMENT_SERVER_URL = getServerUrl();
 document.getElementById('serverUrl').textContent = PAYMENT_SERVER_URL;
 
-// ============================================================
-// SUBMIT PAYMENT
-// ============================================================
 async function submitPayment() {
     const phone = document.getElementById('phoneInput').value.trim();
     const amount = document.getElementById('amountInput').value.trim();
@@ -398,7 +571,7 @@ async function submitPayment() {
                 phone: phone,
                 amount: amount,
                 houseId: 'TENANT-001',
-                accountReference: 'RENT-PAYMENT'
+                accountReference: '001'
             })
         });
 
@@ -427,8 +600,9 @@ async function submitPayment() {
 </html>`;
 
 // ============================================================
-// SERVER
+// ===================== SERVER =====================
 // ============================================================
+
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
@@ -443,22 +617,29 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
     try {
+        // ============================================================
         // ===== SERVE HTML =====
+        // ============================================================
         if (req.method === 'GET' && url.pathname === '/') {
             res.writeHead(200, { 'Content-Type': 'text/html' });
             res.end(HTML_PAGE);
             return;
         }
 
-        // ===== HEALTH =====
+        // ============================================================
+        // ===== HEALTH CHECK =====
+        // ============================================================
         if (req.method === 'GET' && url.pathname === '/api/health') {
             return sendJson(res, 200, { 
                 status: 'ok', 
-                timestamp: new Date().toISOString() 
+                timestamp: new Date().toISOString(),
+                message: 'Server is running'
             });
         }
 
+        // ============================================================
         // ===== TEST OAUTH =====
+        // ============================================================
         if (req.method === 'GET' && url.pathname === '/api/test-oauth') {
             try {
                 const token = await getAccessToken();
@@ -474,7 +655,36 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
+        // ============================================================
+        // ===== M-PESA CALLBACK =====
+        // ============================================================
+        if (req.method === 'POST' && url.pathname === '/api/mpesa-callback') {
+            console.log('\n📥 M-Pesa Callback received!');
+            const body = await readBody(req);
+            console.log('📥 Full callback body:', JSON.stringify(body, null, 2));
+            
+            try {
+                const result = await handleMpesaCallback(body);
+                
+                // Always respond with success to Safaricom
+                // (They need a 200 OK response even if we fail to process)
+                return sendJson(res, 200, {
+                    ResultCode: 0,
+                    ResultDesc: 'Callback received successfully'
+                });
+            } catch (error) {
+                console.error('❌ Callback processing error:', error.message);
+                // Still return 200 to Safaricom
+                return sendJson(res, 200, {
+                    ResultCode: 0,
+                    ResultDesc: 'Callback received (processing error logged)'
+                });
+            }
+        }
+
+        // ============================================================
         // ===== TEST STK =====
+        // ============================================================
         if (req.method === 'POST' && url.pathname === '/api/test-stk') {
             try {
                 const result = await stkPush({
@@ -491,7 +701,9 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
-        // ===== PRODUCTION STK =====
+        // ============================================================
+        // ===== PRODUCTION STK PUSH =====
+        // ============================================================
         if (req.method === 'POST' && url.pathname === '/api/stkpush') {
             const body = await readBody(req);
             
@@ -506,7 +718,7 @@ const server = http.createServer(async (req, res) => {
                 const result = await stkPush({
                     phone: body.phone,
                     amount: body.amount,
-                    accountReference: body.accountReference || 'TenantPortal'
+                    accountReference: body.accountReference || body.houseId || 'TenantPortal'
                 });
                 return sendJson(res, 200, result);
             } catch (err) {
@@ -517,44 +729,80 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
+        // ============================================================
         // ===== ROOT API =====
+        // ============================================================
         if (req.method === 'GET' && url.pathname === '/api') {
             return sendJson(res, 200, {
                 name: 'M-Pesa STK Push API',
                 status: 'Running',
+                version: '2.0.0',
                 endpoints: {
+                    home: 'GET / - HTML Page',
                     health: 'GET /api/health',
                     test_oauth: 'GET /api/test-oauth',
                     test_stk: 'POST /api/test-stk',
-                    stkpush: 'POST /api/stkpush'
+                    stkpush: 'POST /api/stkpush',
+                    callback: 'POST /api/mpesa-callback'
+                },
+                features: {
+                    stk_push: 'Send STK Push to customer',
+                    auto_record: 'Automatically record payments from M-Pesa callbacks',
+                    real_time: 'Firebase real-time updates'
                 }
             });
         }
 
-        return sendJson(res, 404, { error: 'Route not found' });
+        // ============================================================
+        // ===== 404 =====
+        // ============================================================
+        return sendJson(res, 404, { 
+            error: 'Route not found',
+            available: {
+                '/': 'HTML Page',
+                '/api': 'API Info',
+                '/api/health': 'Health Check',
+                '/api/test-oauth': 'Test OAuth',
+                '/api/test-stk': 'Test STK (POST)',
+                '/api/stkpush': 'STK Push (POST)',
+                '/api/mpesa-callback': 'M-Pesa Callback (POST)'
+            }
+        });
 
     } catch (err) {
         console.error('Server error:', err);
-        return sendJson(res, 500, { error: 'Internal server error' });
+        return sendJson(res, 500, { 
+            error: 'Internal server error',
+            message: err.message 
+        });
     }
 });
 
-// ===================== START =====================
+// ============================================================
+// ===================== START SERVER =====================
+// ============================================================
+
 server.listen(PORT, '0.0.0.0', () => {
     console.log('\n========================================');
     console.log('🚀 M-Pesa STK Push API');
     console.log('========================================');
     console.log(`✅ Server running on port: ${PORT}`);
-    console.log(`📍 http://localhost:${PORT}/ - HTML Page`);
-    console.log(`📍 http://localhost:${PORT}/api/health`);
-    console.log(`📍 http://localhost:${PORT}/api/test-oauth`);
+    console.log(`📍 Home: http://localhost:${PORT}/`);
+    console.log(`📍 Health: http://localhost:${PORT}/api/health`);
+    console.log(`📍 OAuth: http://localhost:${PORT}/api/test-oauth`);
+    console.log(`📍 STK: POST /api/stkpush`);
+    console.log(`📍 Callback: POST /api/mpesa-callback`);
     console.log('========================================\n');
 });
 
+// ============================================================
+// ===================== ERROR HANDLERS =====================
+// ============================================================
+
 process.on('uncaughtException', (err) => {
-    console.error('Uncaught Exception:', err);
+    console.error('❌ Uncaught Exception:', err);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection:', reason);
+    console.error('❌ Unhandled Rejection:', reason);
 });
