@@ -1,12 +1,12 @@
 /**
- * M-Pesa STK Push API - WITH MULTIPLE CONNECTION STRATEGIES
+ * M-Pesa STK Push API - STABLE WORKING VERSION
+ * This is the version that worked before adding auto-update logic.
  * Save this as server.js
  */
 
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
-const dns = require('dns');
 
 // ============================================================
 // ===================== CONFIGURATION =====================
@@ -22,110 +22,77 @@ const CALLBACK_URL = 'https://new-mpesa-backend-1.onrender.com/api/mpesa-callbac
 const PORT = process.env.PORT || 10000;
 
 // ============================================================
-// ===================== MULTIPLE AGENTS =====================
+// ===================== HTTPS AGENT =====================
 // ============================================================
 
-// Try different TLS versions
-const agents = [
-    // Agent 1: Standard
-    new https.Agent({
-        rejectUnauthorized: false,
-        keepAlive: true,
-        timeout: 60000,
-        family: 4
-    }),
-    // Agent 2: TLS 1.2 only
-    new https.Agent({
-        rejectUnauthorized: false,
-        keepAlive: true,
-        timeout: 60000,
-        secureProtocol: 'TLSv1_2_method',
-        family: 4
-    }),
-    // Agent 3: Old ciphers
-    new https.Agent({
-        rejectUnauthorized: false,
-        keepAlive: true,
-        timeout: 60000,
-        ciphers: 'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384',
-        family: 4
-    })
-];
+const agent = new https.Agent({
+    rejectUnauthorized: false,
+    keepAlive: true,
+    timeout: 60000
+});
 
 // ============================================================
-// ===================== REQUEST WITH FALLBACK =====================
+// ===================== SIMPLE REQUEST =====================
 // ============================================================
 
-function requestWithFallback(method, urlString, headers = {}, jsonBody = null) {
+function simpleRequest(method, urlString, headers = {}, jsonBody = null) {
     return new Promise((resolve, reject) => {
         const url = new URL(urlString);
         const payload = jsonBody ? JSON.stringify(jsonBody) : null;
-        let agentIndex = 0;
 
-        function attemptRequest() {
-            if (agentIndex >= agents.length) {
-                reject(new Error('All connection attempts failed'));
-                return;
-            }
+        console.log(`\n[REQUEST] ${method} ${urlString}`);
 
-            const currentAgent = agents[agentIndex];
-            console.log(`\n[ATTEMPT ${agentIndex + 1}/${agents.length}] Using agent ${agentIndex + 1}`);
+        const options = {
+            hostname: url.hostname,
+            port: url.port || 443,
+            path: url.pathname + url.search,
+            method: method.toUpperCase(),
+            headers: {
+                ...headers,
+                ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+                'Connection': 'keep-alive'
+            },
+            timeout: 60000,
+            agent: agent,
+            family: 4
+        };
 
-            const options = {
-                hostname: url.hostname,
-                port: url.port || 443,
-                path: url.pathname + url.search,
-                method: method.toUpperCase(),
-                headers: {
-                    ...headers,
-                    ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
-                    'Connection': 'keep-alive',
-                    'Accept': 'application/json',
-                    'User-Agent': 'TenantPortal/2.0'
-                },
-                timeout: 60000,
-                agent: currentAgent,
-                family: 4
-            };
-
-            const req = https.request(options, (res) => {
-                let chunks = [];
-                res.on('data', (chunk) => chunks.push(chunk));
-                res.on('end', () => {
-                    const bodyText = Buffer.concat(chunks).toString('utf8');
-                    let bodyJson = null;
-                    try { bodyJson = JSON.parse(bodyText); } catch (_) {}
-                    
-                    console.log(`[RESPONSE] Status: ${res.statusCode}`);
-                    resolve({
-                        statusCode: res.statusCode,
-                        statusMessage: res.statusMessage,
-                        bodyText,
-                        bodyJson
-                    });
+        const req = https.request(options, (res) => {
+            let chunks = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('end', () => {
+                const bodyText = Buffer.concat(chunks).toString('utf8');
+                let bodyJson = null;
+                try { bodyJson = JSON.parse(bodyText); } catch (_) {}
+                
+                console.log(`[RESPONSE] Status: ${res.statusCode}`);
+                console.log(`[RESPONSE] Body: ${bodyText.substring(0, 500)}`);
+                
+                resolve({
+                    statusCode: res.statusCode,
+                    statusMessage: res.statusMessage,
+                    bodyText,
+                    bodyJson
                 });
             });
+        });
 
-            req.on('error', (err) => {
-                console.error(`[ATTEMPT ${agentIndex + 1} ERROR]`, err.message);
-                agentIndex++;
-                setTimeout(attemptRequest, 1000);
-            });
-            
-            req.on('timeout', () => {
-                console.error(`[ATTEMPT ${agentIndex + 1} TIMEOUT]`);
-                req.destroy();
-                agentIndex++;
-                setTimeout(attemptRequest, 1000);
-            });
+        req.on('error', (err) => {
+            console.error('[REQUEST ERROR]', err.message);
+            reject(new Error(`Request failed: ${err.message}`));
+        });
+        
+        req.on('timeout', () => {
+            console.error('[REQUEST TIMEOUT]');
+            req.destroy();
+            reject(new Error('Request timed out'));
+        });
 
-            if (payload) {
-                req.write(payload);
-            }
-            req.end();
+        if (payload) {
+            console.log(`[PAYLOAD] ${payload.substring(0, 200)}...`);
+            req.write(payload);
         }
-
-        attemptRequest();
+        req.end();
     });
 }
 
@@ -138,7 +105,7 @@ async function getAccessToken() {
     
     const auth = Buffer.from(`${CONSUMER_KEY.trim()}:${CONSUMER_SECRET.trim()}`).toString('base64');
 
-    const res = await requestWithFallback(
+    const res = await simpleRequest(
         'GET',
         'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
         {
@@ -200,6 +167,7 @@ async function stkPush({ phone, amount, accountReference }) {
     if (!formattedPhone || formattedPhone.length < 10) {
         throw new Error(`Invalid phone: ${phone}`);
     }
+    console.log(`📱 Normalized: ${formattedPhone}`);
 
     const token = await getAccessToken();
     const timestamp = timestampNow();
@@ -221,7 +189,7 @@ async function stkPush({ phone, amount, accountReference }) {
 
     console.log('📤 Sending STK Push to Safaricom...');
     
-    const res = await requestWithFallback(
+    const res = await simpleRequest(
         'POST',
         'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
         {
@@ -235,6 +203,9 @@ async function stkPush({ phone, amount, accountReference }) {
         throw new Error('Invalid response from Safaricom');
     }
 
+    console.log(`📊 Response Code: ${res.bodyJson.ResponseCode}`);
+    console.log(`📝 Description: ${res.bodyJson.ResponseDescription}`);
+
     if (res.bodyJson.ResponseCode === '0') {
         console.log('✅ STK Push successful!');
         return {
@@ -243,7 +214,8 @@ async function stkPush({ phone, amount, accountReference }) {
             message: res.bodyJson.CustomerMessage || 'STK Push sent'
         };
     } else {
-        throw new Error(res.bodyJson.ResponseDescription || 'STK Push failed');
+        const errorMsg = res.bodyJson.ResponseDescription || res.bodyJson.CustomerMessage || 'STK Push failed';
+        throw new Error(errorMsg);
     }
 }
 
@@ -379,16 +351,22 @@ const HTML_PAGE = `<!DOCTYPE html>
     <div class="card">
         <h1>🏢 Tenant Portal</h1>
         <p class="subtitle">M-Pesa Payment</p>
+        
         <div class="status-badge" id="serverStatus">✅ Server Online</div>
+
         <label>Phone Number</label>
         <input type="tel" id="phoneInput" placeholder="0712345678">
+
         <label>Amount (KES)</label>
         <input type="number" id="amountInput" placeholder="10" min="1">
+
         <button id="payBtn" onclick="submitPayment()">💳 Pay Now</button>
         <div id="status" class="status info">Ready</div>
+
         <div class="debug" id="debugInfo">Server URL: <span id="serverUrl">Loading...</span></div>
-        <div class="note">🔌 Trying multiple connection strategies...</div>
+        <div class="note">⏱️ Payment requests are sent directly to Safaricom.</div>
     </div>
+
     <script>
         function getServerUrl() {
             const hostname = window.location.hostname;
@@ -408,17 +386,31 @@ const HTML_PAGE = `<!DOCTYPE html>
             const btn = document.getElementById('payBtn');
             const debugEl = document.getElementById('debugInfo');
 
-            if (!phone) { statusEl.textContent = 'Please enter your phone number.'; statusEl.className = 'status error'; return; }
-            if (!amount || Number(amount) <= 0) { statusEl.textContent = 'Please enter a valid amount.'; statusEl.className = 'status error'; return; }
+            if (!phone) {
+                statusEl.textContent = 'Please enter your phone number.';
+                statusEl.className = 'status error';
+                return;
+            }
+            if (!amount || Number(amount) <= 0) {
+                statusEl.textContent = 'Please enter a valid amount.';
+                statusEl.className = 'status error';
+                return;
+            }
 
             btn.disabled = true;
             btn.textContent = 'Processing...';
             statusEl.textContent = 'Sending...';
             statusEl.className = 'status pending';
+            debugEl.textContent = '📤 Sending to: ' + SERVER_URL;
 
             try {
-                const payload = { phone: phone, amount: amount, accountReference: 'TEST-001' };
-                debugEl.textContent = '📤 Sending: ' + JSON.stringify(payload);
+                const payload = {
+                    phone: phone,
+                    amount: amount,
+                    accountReference: 'TEST-001'
+                };
+                
+                debugEl.textContent = '📤 Payload: ' + JSON.stringify(payload);
 
                 const response = await fetch(SERVER_URL, {
                     method: 'POST',
@@ -470,35 +462,48 @@ const server = http.createServer(async (req, res) => {
     console.log(`📥 ${req.method} ${url.pathname}`);
 
     try {
+        // ===== SERVE HTML =====
         if (req.method === 'GET' && url.pathname === '/') {
             res.writeHead(200, { 'Content-Type': 'text/html' });
             res.end(HTML_PAGE);
             return;
         }
 
+        // ===== HEALTH =====
         if (req.method === 'GET' && url.pathname === '/api/health') {
-            return sendJson(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
+            return sendJson(res, 200, { 
+                status: 'ok', 
+                timestamp: new Date().toISOString()
+            });
         }
 
+        // ===== TEST OAUTH =====
         if (req.method === 'GET' && url.pathname === '/api/test-oauth') {
             try {
                 const token = await getAccessToken();
-                return sendJson(res, 200, { success: true, token_preview: token.substring(0, 20) + '...' });
+                return sendJson(res, 200, { 
+                    success: true, 
+                    token_preview: token.substring(0, 20) + '...' 
+                });
             } catch (err) {
-                return sendJson(res, 502, { success: false, error: err.message });
+                return sendJson(res, 502, { 
+                    success: false, 
+                    error: err.message 
+                });
             }
         }
 
+        // ===== STK PUSH =====
         if (req.method === 'POST' && url.pathname === '/api/stkpush') {
-            let body;
-            try {
-                body = await readBody(req);
-            } catch (err) {
-                return sendJson(res, 400, { error: 'Invalid JSON body' });
-            }
+            const body = await readBody(req);
+            console.log('📥 STK Push request:', body);
             
-            if (!body.phone) return sendJson(res, 400, { error: 'Phone number required' });
-            if (!body.amount) return sendJson(res, 400, { error: 'Amount required' });
+            if (!body.phone) {
+                return sendJson(res, 400, { error: 'Phone number required' });
+            }
+            if (!body.amount) {
+                return sendJson(res, 400, { error: 'Amount required' });
+            }
 
             try {
                 const result = await stkPush({
@@ -508,25 +513,39 @@ const server = http.createServer(async (req, res) => {
                 });
                 return sendJson(res, 200, result);
             } catch (err) {
-                return sendJson(res, 502, { success: false, error: err.message });
+                console.error('❌ STK Push error:', err.message);
+                return sendJson(res, 502, { 
+                    success: false, 
+                    error: err.message 
+                });
             }
         }
 
-        return sendJson(res, 404, { 
-            error: 'Route not found',
-            available: {
-                '/': 'HTML Page',
-                '/api/health': 'Health Check',
-                '/api/test-oauth': 'Test OAuth',
-                '/api/stkpush': 'STK Push (POST)'
-            }
-        });
+        // ===== API INFO =====
+        if (req.method === 'GET' && url.pathname === '/api') {
+            return sendJson(res, 200, {
+                name: 'M-Pesa STK Push API',
+                status: 'Running',
+                endpoints: {
+                    home: 'GET /',
+                    health: 'GET /api/health',
+                    test_oauth: 'GET /api/test-oauth',
+                    stkpush: 'POST /api/stkpush'
+                }
+            });
+        }
+
+        return sendJson(res, 404, { error: 'Route not found' });
 
     } catch (err) {
-        console.error('❌ Server error:', err.message);
-        return sendJson(res, 500, { error: 'Internal server error', message: err.message });
+        console.error('Server error:', err);
+        return sendJson(res, 500, { error: 'Internal server error' });
     }
 });
+
+// ============================================================
+// ===================== START =====================
+// ============================================================
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log('\n========================================');
@@ -535,6 +554,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server running on port: ${PORT}`);
     console.log(`📍 http://localhost:${PORT}/`);
     console.log(`📍 http://localhost:${PORT}/api/health`);
+    console.log(`📍 http://localhost:${PORT}/api/test-oauth`);
     console.log('========================================\n');
 });
 
