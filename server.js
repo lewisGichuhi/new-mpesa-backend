@@ -1,7 +1,6 @@
 /**
- * M-Pesa STK Push API - Complete with HTML Page
- * Save this as server.js
- * Run: node server.js
+ * M-Pesa STK Push API - Complete Working Version
+ * Deployed on: https://new-mpesa-backend-1.onrender.com
  */
 
 const http = require('http');
@@ -54,6 +53,9 @@ function request(method, urlString, headers = {}, jsonBody = null) {
                 try { bodyJson = JSON.parse(bodyText); } catch (_) {}
                 
                 console.log(`[RESPONSE] Status: ${res.statusCode}`);
+                if (bodyText) {
+                    console.log(`[RESPONSE] Body: ${bodyText.substring(0, 300)}`);
+                }
                 
                 resolve({
                     statusCode: res.statusCode,
@@ -220,7 +222,7 @@ function readBody(req) {
 }
 
 // ============================================================
-// HTML PAGE (built-in - this is what you were missing)
+// HTML PAGE (built-in - with Render URL)
 // ============================================================
 const HTML_PAGE = `<!DOCTYPE html>
 <html lang="en">
@@ -323,15 +325,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             text-align: center;
         }
         .server-info strong { color: #34d399; }
-        .badge {
-            display: inline-block;
-            background: #10b981;
-            color: white;
-            padding: 2px 10px;
-            border-radius: 20px;
-            font-size: 10px;
-            font-weight: 700;
-        }
     </style>
 </head>
 <body>
@@ -343,7 +336,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             <p class="sub">M-Pesa Payment</p>
         </div>
         <div class="server-info">
-            ✅ Server: <strong id="serverStatus">Connected</strong> | 
+            ✅ Server: <strong>Connected</strong> | 
             URL: <span id="serverUrl">Loading...</span>
         </div>
         <label for="phoneInput">M-Pesa Phone Number</label>
@@ -357,15 +350,16 @@ const HTML_PAGE = `<!DOCTYPE html>
 </div>
 <script>
 // ============================================================
-// SERVER URL - AUTO DETECT
+// SERVER URL - FIXED for Render
 // ============================================================
 function getServerUrl() {
     const hostname = window.location.hostname;
+    // If on localhost, use localhost
     if (hostname === 'localhost' || hostname === '127.0.0.1') {
         return 'http://localhost:10000/api/stkpush';
     }
-    // Replace with your ngrok URL
-    return 'https://ripcord-down-defender.ngrok-free.app/api/stkpush';
+    // For Render deployment
+    return 'https://new-mpesa-backend-1.onrender.com/api/stkpush';
 }
 
 const PAYMENT_SERVER_URL = getServerUrl();
