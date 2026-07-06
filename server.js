@@ -1,5 +1,5 @@
 /**
- * M-Pesa STK Push API - FIXED FOR RENDER
+ * M-Pesa STK Push API - WITH BUILT-IN HTML
  * Save this as server.js
  */
 
@@ -260,6 +260,204 @@ function readBody(req) {
 }
 
 // ============================================================
+// ===================== BUILT-IN HTML PAGE =====================
+// ============================================================
+
+const HTML_PAGE = `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tenant Payment Portal</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            background: #0f172a;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            color: white;
+        }
+        .card {
+            background: #1e293b;
+            padding: 32px 28px;
+            border-radius: 24px;
+            max-width: 420px;
+            width: 100%;
+            border: 1px solid #334155;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+        }
+        h1 { text-align: center; margin-bottom: 8px; font-size: 24px; }
+        .subtitle { text-align: center; color: #94a3b8; font-size: 14px; margin-bottom: 20px; }
+        .status-badge {
+            text-align: center;
+            padding: 8px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 13px;
+            background: rgba(16,185,129,0.1);
+            color: #34d399;
+        }
+        label { display: block; margin: 10px 0 5px; font-size: 13px; color: #94a3b8; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+        input {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            background: #0f172a;
+            color: white;
+            font-size: 16px;
+            box-sizing: border-box;
+            transition: border-color 0.2s;
+        }
+        input:focus {
+            outline: none;
+            border-color: #6366f1;
+            box-shadow: 0 0 0 3px rgba(99,102,241,0.2);
+        }
+        button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            margin-top: 16px;
+            transition: transform 0.15s, box-shadow 0.15s;
+            box-shadow: 0 4px 15px rgba(16,185,129,0.3);
+        }
+        button:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(16,185,129,0.4); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .status { margin-top: 12px; padding: 10px; border-radius: 8px; text-align: center; font-weight: 600; }
+        .success { background: #065f46; color: #34d399; }
+        .error { background: #7f1d1d; color: #fb7185; }
+        .pending { background: #1e3a5f; color: #60a5fa; }
+        .info { background: #1e293b; color: #94a3b8; }
+        .debug {
+            margin-top: 16px;
+            padding: 10px;
+            background: #0f172a;
+            border-radius: 8px;
+            font-size: 11px;
+            color: #64748b;
+            word-break: break-all;
+            max-height: 150px;
+            overflow-y: auto;
+            font-family: monospace;
+        }
+        .note {
+            font-size: 11px;
+            color: #64748b;
+            text-align: center;
+            margin-top: 12px;
+            border-top: 1px solid #1e293b;
+            padding-top: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>🏢 Tenant Portal</h1>
+        <p class="subtitle">M-Pesa Payment</p>
+        
+        <div class="status-badge" id="serverStatus">✅ Server Online</div>
+
+        <label>Phone Number</label>
+        <input type="tel" id="phoneInput" placeholder="0712345678">
+
+        <label>Amount (KES)</label>
+        <input type="number" id="amountInput" placeholder="10" min="1">
+
+        <button id="payBtn" onclick="submitPayment()">💳 Pay Now</button>
+        <div id="status" class="status info">Ready</div>
+
+        <div class="debug" id="debugInfo">Server URL: <span id="serverUrl">Loading...</span></div>
+        <div class="note">⏱️ If payment fails, the server retries automatically up to 3 times.</div>
+    </div>
+
+    <script>
+        function getServerUrl() {
+            const hostname = window.location.hostname;
+            if (hostname === 'localhost' || hostname === '127.0.0.1') {
+                return 'http://localhost:10000/api/stkpush';
+            }
+            return 'https://new-mpesa-backend-1.onrender.com/api/stkpush';
+        }
+
+        const SERVER_URL = getServerUrl();
+        document.getElementById('serverUrl').textContent = SERVER_URL;
+
+        async function submitPayment() {
+            const phone = document.getElementById('phoneInput').value.trim();
+            const amount = document.getElementById('amountInput').value.trim();
+            const statusEl = document.getElementById('status');
+            const btn = document.getElementById('payBtn');
+            const debugEl = document.getElementById('debugInfo');
+
+            if (!phone) {
+                statusEl.textContent = 'Please enter your phone number.';
+                statusEl.className = 'status error';
+                return;
+            }
+            if (!amount || Number(amount) <= 0) {
+                statusEl.textContent = 'Please enter a valid amount.';
+                statusEl.className = 'status error';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = 'Processing...';
+            statusEl.textContent = 'Sending...';
+            statusEl.className = 'status pending';
+            debugEl.textContent = '📤 Sending to: ' + SERVER_URL;
+
+            try {
+                const payload = {
+                    phone: phone,
+                    amount: amount,
+                    accountReference: 'TEST-001'
+                };
+                
+                debugEl.textContent = '📤 Payload: ' + JSON.stringify(payload);
+
+                const response = await fetch(SERVER_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await response.json();
+                debugEl.textContent = '📥 Response: ' + JSON.stringify(data);
+
+                if (response.ok && data.success) {
+                    statusEl.textContent = '✅ Payment sent! Check your phone.';
+                    statusEl.className = 'status success';
+                    document.getElementById('phoneInput').value = '';
+                    document.getElementById('amountInput').value = '';
+                } else {
+                    statusEl.textContent = '❌ Failed: ' + (data.error || data.message || 'Unknown');
+                    statusEl.className = 'status error';
+                }
+            } catch (error) {
+                debugEl.textContent = '❌ Error: ' + error.message;
+                statusEl.textContent = '❌ Error: ' + error.message;
+                statusEl.className = 'status error';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '💳 Pay Now';
+            }
+        }
+    </script>
+</body>
+</html>`;
+
+// ============================================================
 // ===================== CREATE SERVER =====================
 // ============================================================
 
@@ -279,17 +477,10 @@ const server = http.createServer(async (req, res) => {
     console.log(`📥 ${req.method} ${url.pathname}`);
 
     try {
-        // ===== SERVE HTML =====
+        // ===== SERVE HTML (built-in) =====
         if (req.method === 'GET' && url.pathname === '/') {
-            const fs = require('fs');
-            try {
-                const html = fs.readFileSync('./index.html', 'utf8');
-                res.writeHead(200, { 'Content-Type': 'text/html' });
-                res.end(html);
-            } catch (err) {
-                res.writeHead(200, { 'Content-Type': 'text/html' });
-                res.end(`<!DOCTYPE html><html><head><title>Server Running</title></head><body><h1>✅ Server is running!</h1><p>Visit /api/health to check status.</p></body></html>`);
-            }
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.end(HTML_PAGE);
             return;
         }
 
