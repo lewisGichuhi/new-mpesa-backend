@@ -1,13 +1,12 @@
 /**
- * M-Pesa STK Push API - Fixed for Render
- * Uses axios for better SSL handling
+ * M-Pesa STK Push API - Pure Node.js (No Dependencies)
+ * Works with Render's free tier
  */
 
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
-const axios = require('axios');
-const { HttpsProxyAgent } = require('https-proxy-agent');
+const dns = require('dns');
 
 // ============================================================
 // ===================== CONFIGURATION =====================
@@ -23,26 +22,124 @@ const CALLBACK_URL = 'https://new-mpesa-backend-1.onrender.com/api/mpesa-callbac
 const PORT = process.env.PORT || 10000;
 
 // ============================================================
-// ===================== AXIOS INSTANCE =====================
+// ===================== DNS RESOLUTION =====================
 // ============================================================
 
-// Create axios instance with permissive SSL settings
-const axiosInstance = axios.create({
-    httpsAgent: new https.Agent({
-        rejectUnauthorized: false,
-        keepAlive: true,
-        timeout: 60000,
-        secureProtocol: 'TLSv1_2_method',
-        ciphers: 'ALL:!aNULL:!eNULL:!LOW:!EXPORT:!SSLv2',
-        honorCipherOrder: false
-    }),
-    timeout: 60000,
-    headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; TenantPortal/2.0)',
-        'Accept': 'application/json',
-        'Connection': 'keep-alive'
-    }
-});
+// Try to resolve Safaricom's IP to avoid DNS issues
+function resolveHost(hostname) {
+    return new Promise((resolve) => {
+        dns.lookup(hostname, { family: 4 }, (err, address) => {
+            if (err) {
+                console.log(`[DNS] Could not resolve ${hostname}:`, err.message);
+                resolve(null);
+            } else {
+                console.log(`[DNS] ${hostname} -> ${address}`);
+                resolve(address);
+            }
+        });
+    });
+}
+
+// ============================================================
+// ===================== REQUEST WITH MULTIPLE STRATEGIES =====================
+// ============================================================
+
+function requestWithFallback(method, urlString, headers = {}, jsonBody = null) {
+    return new Promise((resolve, reject) => {
+        const url = new URL(urlString);
+        const payload = jsonBody ? JSON.stringify(jsonBody) : null;
+        
+        // Try multiple connection strategies
+        const strategies = [
+            // Strategy 1: Standard
+            () => createRequest({ rejectUnauthorized: false }),
+            // Strategy 2: TLS 1.2
+            () => createRequest({ rejectUnauthorized: false, secureProtocol: 'TLSv1_2_method' }),
+            // Strategy 3: No SSL validation
+            () => createRequest({ rejectUnauthorized: false, secureProtocol: 'TLSv1_method' })
+        ];
+
+        let currentStrategy = 0;
+
+        function createRequest(sslOptions) {
+            return new Promise((resolveReq, rejectReq) => {
+                const options = {
+                    hostname: url.hostname,
+                    port: url.port || 443,
+                    path: url.pathname + url.search,
+                    method: method.toUpperCase(),
+                    headers: {
+                        ...headers,
+                        ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+                        'Connection': 'keep-alive',
+                        'Accept': 'application/json',
+                        'User-Agent': 'TenantPortal/2.0'
+                    },
+                    timeout: 60000,
+                    agent: new https.Agent({
+                        ...sslOptions,
+                        keepAlive: true,
+                        family: 4
+                    }),
+                    family: 4
+                };
+
+                console.log(`[STRATEGY ${currentStrategy + 1}] Connecting to ${options.hostname}`);
+
+                const req = https.request(options, (res) => {
+                    let chunks = [];
+                    res.on('data', (chunk) => chunks.push(chunk));
+                    res.on('end', () => {
+                        const bodyText = Buffer.concat(chunks).toString('utf8');
+                        let bodyJson = null;
+                        try { bodyJson = JSON.parse(bodyText); } catch (_) {}
+                        
+                        console.log(`[STRATEGY ${currentStrategy + 1}] Status: ${res.statusCode}`);
+                        resolveReq({
+                            statusCode: res.statusCode,
+                            statusMessage: res.statusMessage,
+                            bodyText,
+                            bodyJson
+                        });
+                    });
+                });
+
+                req.on('error', (err) => {
+                    console.log(`[STRATEGY ${currentStrategy + 1}] Error: ${err.message}`);
+                    rejectReq(err);
+                });
+                
+                req.on('timeout', () => {
+                    console.log(`[STRATEGY ${currentStrategy + 1}] Timeout`);
+                    req.destroy();
+                    rejectReq(new Error('Timeout'));
+                });
+
+                if (payload) {
+                    req.write(payload);
+                }
+                req.end();
+            });
+        }
+
+        function tryNextStrategy() {
+            if (currentStrategy >= strategies.length) {
+                reject(new Error('All connection strategies failed'));
+                return;
+            }
+
+            strategies[currentStrategy]()
+                .then(resolve)
+                .catch((err) => {
+                    currentStrategy++;
+                    console.log(`⚠️ Strategy ${currentStrategy} failed, trying next...`);
+                    tryNextStrategy();
+                });
+        }
+
+        tryNextStrategy();
+    });
+}
 
 // ============================================================
 // ===================== OAUTH =====================
@@ -53,33 +150,25 @@ async function getAccessToken() {
     
     const auth = Buffer.from(`${CONSUMER_KEY.trim()}:${CONSUMER_SECRET.trim()}`).toString('base64');
 
-    try {
-        const response = await axiosInstance({
-            method: 'GET',
-            url: 'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
-            headers: {
-                'Authorization': `Basic ${auth}`
-            }
-        });
-
-        if (response.status !== 200) {
-            throw new Error(`OAuth failed (${response.status}): ${JSON.stringify(response.data)}`);
+    const res = await requestWithFallback(
+        'GET',
+        'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
+        {
+            'Authorization': `Basic ${auth}`,
+            'Accept': 'application/json'
         }
+    );
 
-        if (!response.data || !response.data.access_token) {
-            throw new Error('No access token in response');
-        }
-
-        console.log('✅ Access token obtained');
-        return response.data.access_token;
-    } catch (error) {
-        console.error('❌ OAuth error:', error.message);
-        if (error.response) {
-            console.error('Response status:', error.response.status);
-            console.error('Response data:', error.response.data);
-        }
-        throw error;
+    if (res.statusCode !== 200) {
+        throw new Error(`OAuth failed (${res.statusCode}): ${res.bodyText}`);
     }
+
+    if (!res.bodyJson || !res.bodyJson.access_token) {
+        throw new Error('No access token in response');
+    }
+
+    console.log('✅ Access token obtained');
+    return res.bodyJson.access_token;
 }
 
 // ============================================================
@@ -145,41 +234,33 @@ async function stkPush({ phone, amount, accountReference }) {
 
     console.log('📤 Sending STK Push to Safaricom...');
     
-    try {
-        const response = await axiosInstance({
-            method: 'POST',
-            url: 'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
-            },
-            data: payload
-        });
+    const res = await requestWithFallback(
+        'POST',
+        'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+        {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+        },
+        payload
+    );
 
-        if (!response.data) {
-            throw new Error('Invalid response from Safaricom');
-        }
+    if (!res.bodyJson) {
+        throw new Error('Invalid response from Safaricom');
+    }
 
-        console.log(`📊 Response Code: ${response.data.ResponseCode}`);
-        console.log(`📝 Description: ${response.data.ResponseDescription}`);
+    console.log(`📊 Response Code: ${res.bodyJson.ResponseCode}`);
+    console.log(`📝 Description: ${res.bodyJson.ResponseDescription}`);
 
-        if (response.data.ResponseCode === '0') {
-            console.log('✅ STK Push successful!');
-            return {
-                success: true,
-                data: response.data,
-                message: response.data.CustomerMessage || 'STK Push sent'
-            };
-        } else {
-            throw new Error(response.data.ResponseDescription || 'STK Push failed');
-        }
-    } catch (error) {
-        console.error('❌ STK Push error:', error.message);
-        if (error.response) {
-            console.error('Response status:', error.response.status);
-            console.error('Response data:', error.response.data);
-        }
-        throw error;
+    if (res.bodyJson.ResponseCode === '0') {
+        console.log('✅ STK Push successful!');
+        return {
+            success: true,
+            data: res.bodyJson,
+            message: res.bodyJson.CustomerMessage || 'STK Push sent'
+        };
+    } else {
+        const errorMsg = res.bodyJson.ResponseDescription || res.bodyJson.CustomerMessage || 'STK Push failed';
+        throw new Error(errorMsg);
     }
 }
 
@@ -328,7 +409,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         <div id="status" class="status info">Ready</div>
 
         <div class="debug" id="debugInfo">Server URL: <span id="serverUrl">Loading...</span></div>
-        <div class="note">⏱️ Using axios for better connection reliability</div>
+        <div class="note">🔄 Trying multiple connection strategies</div>
     </div>
 
     <script>
@@ -435,8 +516,7 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'GET' && url.pathname === '/api/health') {
             return sendJson(res, 200, { 
                 status: 'ok', 
-                timestamp: new Date().toISOString(),
-                message: 'Server is running (axios version)'
+                timestamp: new Date().toISOString()
             });
         }
 
@@ -486,7 +566,6 @@ const server = http.createServer(async (req, res) => {
             return sendJson(res, 200, {
                 name: 'M-Pesa STK Push API',
                 status: 'Running',
-                version: '2.0.0 (axios)',
                 endpoints: {
                     home: 'GET /',
                     health: 'GET /api/health',
